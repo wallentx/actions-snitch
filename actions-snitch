@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+
+set -e
+
+# Color setup
+if ! tput colors >/dev/null 2>&1; then
+    rd=gr=yl=bl=mg=cy=wh=gy=bd=nc=""
+else
+    rd=$(tput setaf 1)   # Red
+    gr=$(tput setaf 2)   # Green
+    yl=$(tput setaf 3)   # Yellow
+    bl=$(tput setaf 4)   # Blue
+    mg=$(tput setaf 5)   # Magenta
+    cy=$(tput setaf 6)   # Cyan
+    wh=$(tput setaf 7)   # White
+    gy=$(tput setaf 8)   # Gray
+    bd=$(tput bold)      # Bold
+    nc=$(tput sgr0)      # No Color
+fi
+
+# Unified message handling function
+msg() {
+    local class="$1"
+    local message="$2"
+    local extra="${3:-}"  # Used for default value, icon, or other extras
+    
+    case "$class" in
+        "header")  echo "${bd}${mg}$message${nc}" ;;
+        "success") echo "${gr}$message${extra:+ $extra}${nc}" ;;
+        "warning") echo "${yl}$message${extra:+ $extra}${nc}" ;;
+        "error")   echo "${rd}$message${extra:+ $extra}${nc}" ;;
+        "info")    echo "${wh}$message${nc}" ;;
+        "help")    echo "${gy}$message${nc}" ;;
+        "code")    echo "${bl}$message${nc}" ;;
+        "section") echo "${cy}$message${nc}" ;;
+        "status")  echo "${gy}$message${extra:+ $extra}${nc}" ;;
+        *) echo "$message" ;;
+    esac
+}
+
+# Function to display usage
+usage() {
+    msg "header" "Usage: actions-snitch [-u] [-p] [-v] [-h]"
+    msg "help" "Options:"
+    msg "success" "  -u    Update outdated actions by creating a new branch and committing changes"
+    msg "success" "  -p    Push changes and create a pull request (requires -u)"
+    msg "success" "  -v    Verbose output - show skipped actions"
+    msg "success" "  -h    Display this help message"
+    echo ""
+    exit 0
+}
+
+# Ensure required tools are installed
+for cmd in gh jq yq curl; do
+    if ! command -v $cmd &>/dev/null; then
+        msg "error" "Error: $cmd is not installed."
+        exit 1
+    fi
+done
+
+# Parse flags
+UPDATE=false
+PUSH_PR=false
+VERBOSE=false
+
+while getopts ":uphv" opt; do
+  case $opt in
+    u) UPDATE=true ;;
+    p) PUSH_PR=true ;;
+    v) VERBOSE=true ;;
+    h) usage ;;
+    \?) msg "error" "Invalid option -$OPTARG" >&2; usage ;;
+  esac
+done
+
+if $VERBOSE; then
+  set -x
+fi
+
+if $PUSH_PR && ! $UPDATE; then
+  msg "error" "Error: -p can only be used with -u"
+  exit 1
+fi
+
+# Cache setup
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/actions-snitch"
+mkdir -p "$CACHE_DIR"
+CACHE_TTL=86400  # Cache validity in seconds (24 hours)
+
+# Function to get cache key
+get_cache_key() {
+    local query="$1"
+    echo "$query" | md5sum | cut -d' ' -f1
+}
+
+# Function to get cached value
+get_cached_value() {
+    local cache_key="$1"
+    local cache_file="$CACHE_DIR/$cache_key"
+    
+    if [[ -f "$cache_file" ]]; then
+        local cache_time
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            # BSD stat (macOS) - redirect stderr to /dev/null to suppress filesystem info
+            cache_time=$(stat -f "%m" "$cache_file" 2>/dev/null)
+        else
+            # GNU stat (Linux)
+            cache_time=$(stat -c "%Y" "$cache_file" 2>/dev/null)
+        fi
+        
+        # Only proceed if we got a valid timestamp
+        if [[ -n "$cache_time" ]] && [[ "$cache_time" =~ ^[0-9]+$ ]]; then
+            local current_time
+            current_time=$(date +%s)
+            
+            if (( current_time - cache_time <= CACHE_TTL )); then
+                cat "$cache_file"
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
+# Function to set cached value
+set_cached_value() {
+    local cache_key="$1"
+    local value="$2"
+    echo "$value" > "$CACHE_DIR/$cache_key"
+}
+
+# Function to make cached GitHub API call
+cached_gh_api() {
+    local endpoint="$1"
+    local jq_query="$2"
+    local cache_key
+    cache_key=$(get_cache_key "gh_api:$endpoint:$jq_query")
+    
+    if cached_value=$(get_cached_value "$cache_key"); then
+        echo "$cached_value"
+        return 0
+    fi
+    
+    if ! result=$(gh api "$endpoint" --jq "$jq_query" 2>/dev/null); then
+        $VERBOSE && msg "error" "  Failed to fetch data from GitHub API: $endpoint"
+        return 1
+    fi
+
+    if [[ -n "$result" ]]; then
+        set_cached_value "$cache_key" "$result"
+        echo "$result"
+        return 0
+    fi
+
+    $VERBOSE && msg "error" "  No data returned from GitHub API: $endpoint"
+    return 1
+}
+
+# Function to fetch compatibility score
+fetch_compat_score() {
+    local repo_name="$1"
+    local current_version="$2"
+    local latest_version="$3"
+
+    # Check cache first
+    local cache_key
+    cache_key=$(get_cache_key "compat_score:${repo_name}:${current_version}:${latest_version}")
+    
+    if cached_value=$(get_cached_value "$cache_key"); then
+        echo "$cached_value"
+        return 0
+    fi
+
+    local badge_url="https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=${repo_name}&package-manager=github_actions&previous-version=${current_version}&new-version=${latest_version}"
+    local svg_content=$(curl -s "$badge_url")
+    local score=$(echo "$svg_content" | grep -oP '<title>compatibility: \K\d+(?=%)' || echo "Unknown")
+    
+    set_cached_value "$cache_key" "$score"
+    echo "$score"
+}
+
+# Function to format compatibility badge
+format_badge() {
+    local score=$1
+    local badge=""
+
+    # ANSI escape codes for colors
+    GRAY="\033[48;2;85;85;85m"
+    RED="\033[48;2;255;19;51m"
+    GREEN="\033[48;2;51;204;17m"
+    UNKNOWN="\033[48;2;153;153;153m"
+    RESET="\033[0m"
+
+    # Format badge
+    if [[ "$score" == "Unknown" ]]; then
+        badge="${GRAY}🤖compatibility:${UNKNOWN} unknown ${RESET}"
+    elif (( score < 80 )); then
+        badge="${GRAY}🤖compatibility:${RED} ${score}% ${RESET}"
+    else
+        badge="${GRAY}🤖compatibility:${GREEN} ${score}% ${RESET}"
+    fi
+
+    echo -e "$badge"
+}
+
+# Main logic
+declare -A findings  # Associative array to store findings per file
+
+while IFS= read -r file; do
+    file_has_findings=false
+    file_findings=""
+
+    # Debug output in verbose mode
+    $VERBOSE && msg "info" "Checking file: $file"
+
+    # First check if the file has any actions
+    if ! yq -e '.jobs.*.steps[].uses' "$file" >/dev/null 2>&1; then
+        $VERBOSE && msg "status" "  No actions found in $file"
+        continue
+    fi
+
+    # Use process substitution and a while loop to read the output
+    while IFS=$'\t' read -r location action; do
+        [[ -z "$action" ]] && continue
+        
+        # Extract line number from location (format: filename:line)
+        line_number=$(echo "$location" | cut -d':' -f2)
+        
+        # Debug output in verbose mode
+        $VERBOSE && msg "info" "Found action at line $line_number: $action"
+        
+        repo=$(echo "$action" | cut -d'@' -f1)
+        current_version=$(echo "$action" | cut -d'@' -f2 | sed 's/^v//')  # Remove leading 'v'
+
+        [[ "$repo" == *"docker://"* ]] && continue
+
+        # Skip internal/private repository paths
+        if [[ "$repo" == *"/"*"/"*"/"* ]]; then
+            $VERBOSE && msg "status" "  🔒 Skipping internal action: $repo"
+            continue
+        fi
+
+        # Skip branches like 'main' or 'master'
+        if [[ "$current_version" =~ ^(main|master)$ ]]; then
+            $VERBOSE && msg "status" "  🚫 Skipping $repo targeting branch '$current_version'"
+            continue
+        fi
+
+        # Use cached API calls
+        latest_version=$(cached_gh_api "repos/${repo}/releases/latest" '.tag_name' | sed 's/^v//')
+        latest_version=${latest_version:-$(cached_gh_api "repos/${repo}" '.default_branch')}
+
+        # Handle commit SHAs
+        if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then
+            latest_sha=$(cached_gh_api "repos/${repo}/commits/${latest_version}" '.sha')
+
+            # Cache the commit diff calculation
+            commit_diff_cache_key=$(get_cache_key "commit_diff:${repo}:${current_version}:${latest_sha}")
+            if ! commit_diff=$(get_cached_value "$commit_diff_cache_key"); then
+                temp_dir=$(mktemp -d)
+                git clone --depth=1 https://github.com/$repo.git "$temp_dir" >/dev/null 2>&1
+
+                (
+                    cd "$temp_dir"
+                    git fetch origin "$current_version" >/dev/null 2>&1
+                    commit_diff=$(git rev-list --count "${current_version}..${latest_sha}" 2>/dev/null)
+                )
+
+                rm -rf "$temp_dir"
+                set_cached_value "$commit_diff_cache_key" "$commit_diff"
+            fi
+
+            if [[ "$commit_diff" -gt 0 ]]; then
+                file_has_findings=true
+                file_findings+="    ❗ $(msg "warning" "$repo is outdated (commit SHA):")\n"
+                file_findings+="      Line: $(msg "info" "$line_number")\n"
+                file_findings+="      Current: $(msg "warning" "$current_version")\n"
+                file_findings+="      Latest: $(msg "success" "$latest_version")\n"
+                file_findings+="      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")\n\n"
+            fi
+
+            continue
+        fi
+
+        # Compare versions
+        current_major_minor_patch=$(echo "$current_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
+        latest_major_minor_patch=$(echo "$latest_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
+
+        # If only MAJOR is specified, compare MAJOR
+        if [[ "$current_version" =~ ^[0-9]+$ ]]; then
+            current_major=$(echo "$current_version" | grep -oP '^\d+')
+            latest_major=$(echo "$latest_version" | grep -oP '^\d+')
+            [[ "$current_major" == "$latest_major" ]] && continue
+            latest_version="$latest_major"
+        fi
+
+        if [[ -n "$current_major_minor_patch" && "$current_major_minor_patch" != "$latest_major_minor_patch" ]]; then
+            COMPAT_SCORE=$(fetch_compat_score "$repo" "$current_version" "$latest_version")
+            badge=$(format_badge "$COMPAT_SCORE")
+
+            file_has_findings=true
+            file_findings+="    ❗ $(msg "warning" "$repo is outdated:")\n"
+            file_findings+="      Line: $(msg "info" "$line_number")\n"
+            file_findings+="      Current: $(msg "warning" "$current_version")\n"
+            file_findings+="      Latest: $(msg "success" "$latest_version")\n"
+            file_findings+="      $badge\n"
+            file_findings+="      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")\n\n"
+
+            if $UPDATE; then
+                branch="actions-snitch/${repo//\//-}-$latest_version"
+                git checkout -b "$branch"
+                sed -i "s|${repo}@v*${current_version}|${repo}@v${latest_version}|g" "$file"
+                git add "$file"
+                git commit -m "Bump $repo from $current_version to $latest_version"
+
+                if $PUSH_PR; then
+                    git push -u origin "$branch"
+                    PR_BODY="Bumps [$repo](https://github.com/$repo) from $current_version to $latest_version."
+                    gh pr create --title "Bump $repo from $current_version to $latest_version" \
+                                 --body "$PR_BODY" \
+                                 --head "$branch" \
+                                 --base "main"
+                fi
+            fi
+        else
+            $VERBOSE && msg "success" "  ✅ $repo is up-to-date ($current_version)"
+        fi
+    done < <(yq -r '.jobs.*.steps[] | select(.uses) | [filename + ":" + (line), .uses] | @tsv' "$file")
+
+    # If file had findings, print the file header and all findings
+    if [[ "$file_has_findings" == "true" ]]; then
+        msg "section" "Findings in $file:"
+        echo -e "$file_findings"
+    fi
+done < <(find .github/workflows -name '*.yml')
+
+if $VERBOSE; then
+    set +x
+fi
