@@ -40,12 +40,14 @@ msg() {
 
 # Function to display usage
 usage() {
-    msg "header" "Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-v] [-h]"
+    msg "header" "Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"
     msg "help" "Options:"
     msg "success" "  -u    Update outdated actions in-place"
     msg "success" "  -f    Force updates regardless of compatibility score (requires -u or -p)"
     msg "success" "  -p    Commit, push, and create a pull request after updating actions (implies -u)"
     msg "success" "  -b    Branch to update or create before applying changes (requires -u or -p)"
+    msg "success" "  -o    Output findings as json, md, or yaml"
+    msg "success" "  -t    Only update actions from GitHub Marketplace verified creators (requires -u or -p)"
     msg "success" "  -v    Verbose output - show skipped actions"
     msg "success" "  -h    Display this help message"
     echo ""
@@ -65,14 +67,18 @@ UPDATE=false
 FORCE=false
 PUSH_PR=false
 TARGET_BRANCH=""
+OUTPUT_FORMAT=""
+VERIFIED_CREATORS_ONLY=false
 VERBOSITY=0
 
-while getopts ":ufpb:hv" opt; do
+while getopts ":ufpb:o:thv" opt; do
   case $opt in
     u) UPDATE=true ;;
     f) FORCE=true ;;
     p) PUSH_PR=true ;;
     b) TARGET_BRANCH="$OPTARG" ;;
+    o) OUTPUT_FORMAT="$OPTARG" ;;
+    t) VERIFIED_CREATORS_ONLY=true ;;
     v) ((VERBOSITY++)) ;;
     h) usage ;;
     \?) msg "error" "Invalid option -$OPTARG" >&2; usage ;;
@@ -103,11 +109,28 @@ if [[ -n "$TARGET_BRANCH" ]] && ! $UPDATE; then
   exit 1
 fi
 
+if $VERIFIED_CREATORS_ONLY && ! $UPDATE; then
+  msg "error" "Error: -t can only be used with -u or -p"
+  exit 1
+fi
+
+case "$OUTPUT_FORMAT" in
+  ""|"json"|"md"|"yaml") ;;
+  *)
+    msg "error" "Error: -o must be one of: json, md, yaml" >&2
+    exit 1
+    ;;
+esac
+
+structured_output() {
+    [[ -n "$OUTPUT_FORMAT" ]]
+}
+
 # Spinner setup
 SPINNER_TMPFILES=()
 
 spinner_cleanup() {
-  tput cnorm 2> /dev/null
+  tput cnorm > /dev/null 2> /dev/null
   local tmpout
   for tmpout in "${SPINNER_TMPFILES[@]}"; do
     rm -f "$tmpout" 2> /dev/null
@@ -316,8 +339,336 @@ format_badge() {
     echo -e "$badge"
 }
 
+marketplace_slug() {
+    local name="$1"
+
+    printf "%s" "$name" |
+        tr '[:upper:]' '[:lower:]' |
+        sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
+}
+
+fetch_action_name() {
+    local repo="$1"
+    local cache_key cached_value default_branch action_file action_name
+
+    cache_key=$(get_cache_key "action_name:${repo}")
+
+    if cached_value=$(get_cached_value "$cache_key"); then
+        echo "$cached_value"
+        [[ -n "$cached_value" ]]
+        return
+    fi
+
+    if ! default_branch=$(cached_gh_api "repos/${repo}" '.default_branch'); then
+        set_cached_value "$cache_key" ""
+        return 1
+    fi
+
+    for action_file in action.yml action.yaml; do
+        if action_name=$(
+            curl -fsSL "https://raw.githubusercontent.com/${repo}/${default_branch}/${action_file}" 2>/dev/null |
+                yq -r '.name // ""' 2>/dev/null
+        ) && [[ -n "$action_name" && "$action_name" != "null" ]]; then
+            set_cached_value "$cache_key" "$action_name"
+            echo "$action_name"
+            return 0
+        fi
+    done
+
+    set_cached_value "$cache_key" ""
+    return 1
+}
+
+fetch_verified_creator() {
+    local repo="$1"
+    local cache_key cached_value action_name slug page verified_creator=false
+
+    cache_key=$(get_cache_key "verified_creator:${repo}")
+
+    if cached_value=$(get_cached_value "$cache_key"); then
+        echo "$cached_value"
+        return 0
+    fi
+
+    if action_name=$(fetch_action_name "$repo"); then
+        slug=$(marketplace_slug "$action_name")
+
+        if [[ -n "$slug" ]] && page=$(curl -fsSL "https://github.com/marketplace/actions/${slug}" 2>/dev/null); then
+            if [[ "$page" == *"GitHub has manually verified the creator of the action as an official partner organization."* ]]; then
+                verified_creator=true
+            fi
+        fi
+    fi
+
+    set_cached_value "$cache_key" "$verified_creator"
+    echo "$verified_creator"
+}
+
+verified_label() {
+    local label="$1"
+    local verified_creator="$2"
+
+    if [[ "$verified_creator" == "true" ]]; then
+        printf "☑️ %s" "$label"
+    else
+        printf "%s" "$label"
+    fi
+}
+
+version_number_prefix() {
+    local version="$1"
+
+    if [[ "$version" =~ ^([0-9]+(\.[0-9]+)?(\.[0-9]+)?) ]]; then
+        printf "%s" "${BASH_REMATCH[1]}"
+    fi
+}
+
+version_major() {
+    local version="$1"
+
+    if [[ "$version" =~ ^([0-9]+) ]]; then
+        printf "%s" "${BASH_REMATCH[1]}"
+    fi
+}
+
+current_repo_name() {
+    local top_level
+
+    if top_level=$(git rev-parse --show-toplevel 2>/dev/null); then
+        basename "$top_level"
+    else
+        basename "$(pwd)"
+    fi
+}
+
+normalize_repo_url() {
+    local remote_url="$1"
+
+    case "$remote_url" in
+        git@*:*.git)
+            remote_url="${remote_url%.git}"
+            remote_url="${remote_url/git@/https://}"
+            remote_url="${remote_url/:/\/}"
+            ;;
+        git@*:*)
+            remote_url="${remote_url/git@/https://}"
+            remote_url="${remote_url/:/\/}"
+            ;;
+        ssh://git@*.git)
+            remote_url="${remote_url%.git}"
+            remote_url="${remote_url/ssh:\/\/git@/https://}"
+            ;;
+        ssh://git@*)
+            remote_url="${remote_url/ssh:\/\/git@/https://}"
+            ;;
+        http://*.git|https://*.git)
+            remote_url="${remote_url%.git}"
+            ;;
+    esac
+
+    printf "%s" "$remote_url"
+}
+
+current_repo_url() {
+    local remote_url
+
+    if remote_url=$(git remote get-url origin 2>/dev/null); then
+        normalize_repo_url "$remote_url"
+    fi
+}
+
+markdown_link_text_escape() {
+    local value="$1"
+
+    value=${value//\\/\\\\}
+    value=${value//]/\\]}
+    value=${value//$'\n'/ }
+    printf "%s" "$value"
+}
+
+json_finding() {
+    local file="$1"
+    local line_number="$2"
+    local action="$3"
+    local repo="$4"
+    local current_version="$5"
+    local latest_version="$6"
+    local compatibility_score="$7"
+    local verified_creator="$8"
+    local release_notes="$9"
+    local -a compatibility_args
+
+    if [[ "$compatibility_score" =~ ^[0-9]+$ ]]; then
+        compatibility_args=(--argjson compatibility_score "$compatibility_score")
+    elif [[ -n "$compatibility_score" ]]; then
+        compatibility_args=(--arg compatibility_score "$compatibility_score")
+    else
+        compatibility_args=(--argjson compatibility_score null)
+    fi
+
+    jq -n \
+       --arg file "$file" \
+       --argjson line "$line_number" \
+       --arg action "$action" \
+       --arg repository "$repo" \
+       --arg current "$current_version" \
+       --arg latest "$latest_version" \
+       "${compatibility_args[@]}" \
+       --argjson verified_creator "$verified_creator" \
+       --arg release_notes "$release_notes" \
+       '{
+          file: $file,
+          line: $line,
+          action: $action,
+          repository: $repository,
+          current: $current,
+          latest: $latest,
+          compatibility_score: $compatibility_score,
+          verified_creator: $verified_creator,
+          release_notes: $release_notes
+        }'
+}
+
+markdown_escape() {
+    local value="$1"
+
+    value=${value//|/\\|}
+    value=${value//$'\n'/ }
+    printf "%s" "$value"
+}
+
+yaml_quote() {
+    local value="$1"
+
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    printf '"%s"' "$value"
+}
+
+yaml_key() {
+    local value="$1"
+
+    if [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        printf "%s" "$value"
+    else
+        yaml_quote "$value"
+    fi
+}
+
+yaml_scalar() {
+    local value="$1"
+
+    if [[ -z "$value" ]]; then
+        printf "null"
+    elif [[ "$value" =~ ^[0-9]+$ ]]; then
+        printf "%s" "$value"
+    else
+        yaml_quote "$value"
+    fi
+}
+
+FINDING_SEP=$'\034'
 UPDATED_ACTIONS=()
 UPDATE_COUNT=0
+FINDINGS=()
+SCAN_REPO_NAME=$(current_repo_name)
+SCAN_REPO_URL=$(current_repo_url)
+
+record_finding() {
+    local file="$1"
+    local line_number="$2"
+    local action="$3"
+    local repo="$4"
+    local current_version="$5"
+    local latest_version="$6"
+    local compatibility_score="$7"
+    local verified_creator="$8"
+    local release_notes="https://github.com/$repo/releases/tag/v$latest_version"
+
+    FINDINGS+=("${file}${FINDING_SEP}${line_number}${FINDING_SEP}${action}${FINDING_SEP}${repo}${FINDING_SEP}${current_version}${FINDING_SEP}${latest_version}${FINDING_SEP}${compatibility_score}${FINDING_SEP}${verified_creator}${FINDING_SEP}${release_notes}")
+}
+
+render_json_report() {
+    local finding file line_number action repo current_version latest_version compatibility_score verified_creator release_notes
+
+    if (( ${#FINDINGS[@]} == 0 )); then
+        return
+    fi
+
+    for finding in "${FINDINGS[@]}"; do
+        IFS="$FINDING_SEP" read -r file line_number action repo current_version latest_version compatibility_score verified_creator release_notes <<< "$finding"
+        json_finding "$file" "$line_number" "$action" "$repo" "$current_version" "$latest_version" "$compatibility_score" "$verified_creator" "$release_notes"
+    done | jq -s --arg repo "$SCAN_REPO_NAME" '{($repo): .}'
+}
+
+render_markdown_report() {
+    local finding file line_number action repo current_version latest_version compatibility_score verified_creator release_notes compatibility_display action_display
+
+    if (( ${#FINDINGS[@]} == 0 )); then
+        return
+    fi
+
+    if [[ -n "$SCAN_REPO_URL" ]]; then
+        printf "## [%s](%s)\n\n" "$(markdown_link_text_escape "$SCAN_REPO_NAME")" "$SCAN_REPO_URL"
+    else
+        printf "## %s\n\n" "$SCAN_REPO_NAME"
+    fi
+    printf "| File | Line | Action | Current | Latest | Compatibility | Release Notes |\n"
+    printf "| --- | ---: | --- | --- | --- | ---: | --- |\n"
+
+    for finding in "${FINDINGS[@]}"; do
+        IFS="$FINDING_SEP" read -r file line_number action repo current_version latest_version compatibility_score verified_creator release_notes <<< "$finding"
+        if [[ "$compatibility_score" =~ ^[0-9]+$ ]]; then
+            compatibility_display="${compatibility_score}%"
+        elif [[ -n "$compatibility_score" ]]; then
+            compatibility_display="$compatibility_score"
+        else
+            compatibility_display=""
+        fi
+        action_display=$(verified_label "$action" "$verified_creator")
+
+        printf "| %s | %s | %s | %s | %s | %s | %s |\n" \
+            "$(markdown_escape "$file")" \
+            "$(markdown_escape "$line_number")" \
+            "$(markdown_escape "$action_display")" \
+            "$(markdown_escape "$current_version")" \
+            "$(markdown_escape "$latest_version")" \
+            "$(markdown_escape "$compatibility_display")" \
+            "$(markdown_escape "$release_notes")"
+    done
+}
+
+render_yaml_report() {
+    local finding file line_number action repo current_version latest_version compatibility_score verified_creator release_notes
+
+    if (( ${#FINDINGS[@]} == 0 )); then
+        return
+    fi
+
+    printf "%s:\n" "$(yaml_key "$SCAN_REPO_NAME")"
+
+    for finding in "${FINDINGS[@]}"; do
+        IFS="$FINDING_SEP" read -r file line_number action repo current_version latest_version compatibility_score verified_creator release_notes <<< "$finding"
+        printf "  - file: %s\n" "$(yaml_quote "$file")"
+        printf "    line: %s\n" "$line_number"
+        printf "    action: %s\n" "$(yaml_quote "$action")"
+        printf "    repository: %s\n" "$(yaml_quote "$repo")"
+        printf "    current: %s\n" "$(yaml_quote "$current_version")"
+        printf "    latest: %s\n" "$(yaml_quote "$latest_version")"
+        printf "    compatibility_score: %s\n" "$(yaml_scalar "$compatibility_score")"
+        printf "    verified_creator: %s\n" "$verified_creator"
+        printf "    release_notes: %s\n" "$(yaml_quote "$release_notes")"
+    done
+}
+
+render_report() {
+    case "$OUTPUT_FORMAT" in
+        "json") render_json_report ;;
+        "md") render_markdown_report ;;
+        "yaml") render_yaml_report ;;
+    esac
+}
 
 is_interactive() {
     [[ -t 0 && -t 1 ]]
@@ -414,20 +765,237 @@ update_action_ref() {
     sed -i "s|${repo}@v*${current_version}|${repo}@v${latest_version}|g" "$file"
     UPDATE_COUNT=$((UPDATE_COUNT + 1))
     UPDATED_ACTIONS+=("$repo|$current_version|$latest_version|$file")
-    msg "success" "      Updated $repo from $current_version to $latest_version"
+    if ! structured_output; then
+        msg "success" "      Updated $repo from $current_version to $latest_version"
+    fi
+}
+
+github_repo_url() {
+    local repo="$1"
+
+    printf "https://github.com/%s" "$repo"
+}
+
+github_version_ref() {
+    local version="$1"
+
+    if [[ "$version" == v* ]]; then
+        printf "%s" "$version"
+    else
+        printf "v%s" "$version"
+    fi
+}
+
+print_blockquote() {
+    local text="$1"
+    local line
+
+    while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+            printf "> %s\n" "$line"
+        else
+            printf ">\n"
+        fi
+    done <<< "$text"
+}
+
+print_details_block() {
+    local summary="$1"
+    local source_text="$2"
+    local content="$3"
+
+    printf "<details>\n"
+    printf "<summary>%s</summary>\n\n" "$summary"
+    printf "_%s_\n\n" "$source_text"
+    print_blockquote "$content"
+    printf "</details>\n\n"
+}
+
+fetch_release_notes_body() {
+    local repo="$1"
+    local latest_version="$2"
+    local tag body
+
+    tag=$(github_version_ref "$latest_version")
+
+    if body=$(cached_gh_api "repos/${repo}/releases/tags/${tag}" '.body') && [[ -n "$body" ]]; then
+        printf "## %s\n%s" "$tag" "$body"
+        return 0
+    fi
+
+    if [[ "$tag" != "$latest_version" ]] && body=$(cached_gh_api "repos/${repo}/releases/tags/${latest_version}" '.body') && [[ -n "$body" ]]; then
+        printf "## %s\n%s" "$latest_version" "$body"
+        return 0
+    fi
+
+    return 1
+}
+
+print_release_notes_section() {
+    local repo="$1"
+    local latest_version="$2"
+    local release_notes
+
+    if release_notes=$(fetch_release_notes_body "$repo" "$latest_version"); then
+        print_details_block \
+            "Release notes" \
+            "Sourced from [${repo}'s releases]($(github_repo_url "$repo")/releases)." \
+            "$release_notes"
+    else
+        print_details_block \
+            "Release notes" \
+            "No release notes were found in [${repo}'s releases]($(github_repo_url "$repo")/releases)." \
+            "actions-snitch could not find release notes for $(github_version_ref "$latest_version")."
+    fi
+}
+
+fetch_changelog_body() {
+    local repo="$1"
+    local path="$2"
+    local default_branch="$3"
+
+    curl -fsSL "https://raw.githubusercontent.com/${repo}/${default_branch}/${path}" 2>/dev/null |
+        sed -n '1,160p'
+}
+
+print_changelog_section() {
+    local repo="$1"
+    local default_branch path changelog
+
+    if ! default_branch=$(cached_gh_api "repos/${repo}" '.default_branch'); then
+        default_branch="main"
+    fi
+
+    for path in CHANGELOG.md changelog.md CHANGES.md HISTORY.md; do
+        if changelog=$(fetch_changelog_body "$repo" "$path" "$default_branch") && [[ -n "$changelog" ]]; then
+            print_details_block \
+                "Changelog" \
+                "Sourced from [${repo}'s changelog]($(github_repo_url "$repo")/blob/${default_branch}/${path})." \
+                "$changelog"
+            return
+        fi
+    done
+
+    print_details_block \
+        "Changelog" \
+        "No changelog file was found for ${repo}." \
+        "actions-snitch looked for CHANGELOG.md, changelog.md, CHANGES.md, and HISTORY.md."
+}
+
+fetch_compare_commits() {
+    local repo="$1"
+    local current_version="$2"
+    local latest_version="$3"
+    local base head
+
+    base=$(github_version_ref "$current_version")
+    head=$(github_version_ref "$latest_version")
+
+    cached_gh_api "repos/${repo}/compare/${base}...${head}" '.commits[:10][] | [.sha[0:7], (.commit.message | split("\n")[0]), .html_url] | @tsv'
+}
+
+print_commits_section() {
+    local repo="$1"
+    local current_version="$2"
+    local latest_version="$3"
+    local commits commit_lines sha subject url compare_url
+
+    compare_url="$(github_repo_url "$repo")/compare/$(github_version_ref "$current_version")...$(github_version_ref "$latest_version")"
+
+    if commits=$(fetch_compare_commits "$repo" "$current_version" "$latest_version") && [[ -n "$commits" ]]; then
+        commit_lines=""
+        while IFS=$'\t' read -r sha subject url; do
+            [[ -z "$sha" ]] && continue
+            commit_lines+="- [\`${sha}\`](${url}) ${subject}"$'\n'
+        done <<< "$commits"
+        commit_lines+="See full diff in [compare view](${compare_url})."
+        print_details_block "Commits" "Sourced from [${repo}'s commit history](${compare_url})." "$commit_lines"
+    else
+        print_details_block \
+            "Commits" \
+            "No commit comparison was available for ${repo}." \
+            "See the [compare view](${compare_url})."
+    fi
+}
+
+print_compatibility_badge() {
+    local repo="$1"
+    local current_version="$2"
+    local latest_version="$3"
+    local badge_url
+
+    badge_url="https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=${repo}&package-manager=github_actions&previous-version=${current_version}&new-version=${latest_version}"
+    printf "[![Dependabot compatibility score](%s)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\n" "$badge_url"
+}
+
+build_pr_update_lines() {
+    local update repo current_version latest_version _file key
+    local -A counts=()
+    local -a order=()
+
+    for update in "${UPDATED_ACTIONS[@]}"; do
+        IFS='|' read -r repo current_version latest_version _file <<< "$update"
+        key="${repo}|${current_version}|${latest_version}"
+        if [[ -z "${counts[$key]+set}" ]]; then
+            order+=("$key")
+            counts[$key]=0
+        fi
+        counts[$key]=$((counts[$key] + 1))
+    done
+
+    for key in "${order[@]}"; do
+        printf "%s|%s\n" "$key" "${counts[$key]}"
+    done
+}
+
+pr_update_count() {
+    local count=0
+    local repo current_version latest_version entry_count
+
+    while IFS='|' read -r repo current_version latest_version entry_count; do
+        count=$((count + 1))
+    done < <(build_pr_update_lines)
+
+    printf "%s" "$count"
+}
+
+build_update_link_list() {
+    local repo current_version latest_version entry_count
+    local separator=""
+
+    while IFS='|' read -r repo current_version latest_version entry_count; do
+        printf "%s[%s](%s)" "$separator" "$repo" "$(github_repo_url "$repo")"
+        separator=", "
+    done < <(build_pr_update_lines)
 }
 
 build_pr_body() {
-    local update repo current_version latest_version file
+    local repo current_version latest_version entry_count
+    local count update_word
 
-    printf "Updates GitHub Actions detected by actions-snitch.\n\n"
-    printf "| Action | From | To | File |\n"
-    printf "| --- | --- | --- | --- |\n"
+    count=$(pr_update_count)
+    if (( count == 1 )); then
+        update_word="update"
+    else
+        update_word="updates"
+    fi
 
-    for update in "${UPDATED_ACTIONS[@]}"; do
-        IFS='|' read -r repo current_version latest_version file <<< "$update"
-        printf "| %s | %s | %s | %s |\n" "$repo" "$current_version" "$latest_version" "$file"
-    done
+    printf "Bumps the github-actions group with %d %s: %s.\n\n" "$count" "$update_word" "$(build_update_link_list)"
+
+    while IFS='|' read -r repo current_version latest_version entry_count; do
+        printf "## [%s](%s)\n\n" "$repo" "$(github_repo_url "$repo")"
+        if (( entry_count == 1 )); then
+            printf "Updates \`%s\` from %s to %s.\n\n" "$repo" "$current_version" "$latest_version"
+        else
+            printf "Updates \`%s\` from %s to %s across %d workflow entries.\n\n" "$repo" "$current_version" "$latest_version" "$entry_count"
+        fi
+        print_release_notes_section "$repo" "$latest_version"
+        print_changelog_section "$repo"
+        print_commits_section "$repo" "$current_version" "$latest_version"
+        print_compatibility_badge "$repo" "$current_version" "$latest_version"
+    done < <(build_pr_update_lines)
+
+    printf "<sub>Findings and PR created by [actions-snitch](https://github.com/wallentx/actions-snitch).</sub>\n"
 }
 
 commit_push_pr() {
@@ -438,19 +1006,25 @@ commit_push_pr() {
     fi
 
     if (( UPDATE_COUNT == 0 )); then
-        msg "status" "No workflow updates were made; skipping commit, push, and PR creation."
+        if ! structured_output; then
+            msg "status" "No workflow updates were made; skipping commit, push, and PR creation."
+        fi
         return
     fi
 
     if git diff --quiet -- .github/workflows; then
-        msg "status" "No workflow file changes detected; skipping commit, push, and PR creation."
+        if ! structured_output; then
+            msg "status" "No workflow file changes detected; skipping commit, push, and PR creation."
+        fi
         return
     fi
 
     git add .github/workflows
 
     if git diff --cached --quiet; then
-        msg "status" "No staged workflow changes detected; skipping commit, push, and PR creation."
+        if ! structured_output; then
+            msg "status" "No staged workflow changes detected; skipping commit, push, and PR creation."
+        fi
         return
     fi
 
@@ -466,12 +1040,21 @@ commit_push_pr() {
 
     pr_body=$(build_pr_body)
 
-    git commit -m "$title"
-    git push -u origin "$branch"
-    gh pr create --title "$title" \
-                 --body "$pr_body" \
-                 --head "$branch" \
-                 --base "main"
+    if structured_output; then
+        git commit -m "$title" >&2
+        git push -u origin "$branch" >&2
+        gh pr create --title "$title" \
+                     --body "$pr_body" \
+                     --head "$branch" \
+                     --base "main" >&2
+    else
+        git commit -m "$title"
+        git push -u origin "$branch"
+        gh pr create --title "$title" \
+                     --body "$pr_body" \
+                     --head "$branch" \
+                     --base "main"
+    fi
 }
 
 # Main scanning logic
@@ -480,11 +1063,11 @@ scan_files() {
         file_header_printed=false
 
         # Debug output in verbose mode
-        $VERBOSE && msg "info" "Checking file: $file"
+        ! structured_output && $VERBOSE && msg "info" "Checking file: $file"
 
         # First check if the file has any actions
         if ! yq -e '.jobs.*.steps[].uses' "$file" >/dev/null 2>&1; then
-            $VERBOSE && msg "status" "  No actions found in $file"
+            ! structured_output && $VERBOSE && msg "status" "  No actions found in $file"
             continue
         fi
 
@@ -496,7 +1079,7 @@ scan_files() {
             line_number=$(echo "$location" | cut -d':' -f2)
             
             # Debug output in verbose mode
-            $VERBOSE && msg "info" "Found action at line $line_number: $action"
+            ! structured_output && $VERBOSE && msg "info" "Found action at line $line_number: $action"
             
             full_action_path=$(echo "$action" | cut -d'@' -f1)
             # Extract owner/repo (first two components)
@@ -507,13 +1090,13 @@ scan_files() {
 
             # Skip internal/private repository paths
             if [[ "$full_action_path" == *"/"*"/"*"/"* ]]; then
-                $VERBOSE && msg "status" "  🔒 Skipping internal action: $full_action_path"
+                ! structured_output && $VERBOSE && msg "status" "  🔒 Skipping internal action: $full_action_path"
                 continue
             fi
 
             # Skip branches like 'main' or 'master'
             if [[ "$current_version" =~ ^(main|master)$ ]]; then
-                $VERBOSE && msg "status" "  🚫 Skipping $repo targeting branch '$current_version'"
+                ! structured_output && $VERBOSE && msg "status" "  🚫 Skipping $repo targeting branch '$current_version'"
                 continue
             fi
 
@@ -523,14 +1106,14 @@ scan_files() {
             elif default_branch=$(cached_gh_api "repos/${repo}" '.default_branch'); then
                  latest_version="$default_branch"
             else
-                 $VERBOSE && msg "warning" "  Unable to determine latest version for $repo" >&2
+                 ! structured_output && $VERBOSE && msg "warning" "  Unable to determine latest version for $repo" >&2
                  continue
             fi
 
             # Handle commit SHAs
             if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then
                 if ! latest_sha=$(cached_gh_api "repos/${repo}/commits/${latest_version}" '.sha'); then
-                     $VERBOSE && msg "warning" "  Unable to determine SHA for $repo version $latest_version" >&2
+                     ! structured_output && $VERBOSE && msg "warning" "  Unable to determine SHA for $repo version $latest_version" >&2
                      continue
                 fi
 
@@ -553,59 +1136,79 @@ scan_files() {
                 fi
 
                 if [[ "$commit_diff" -gt 0 ]]; then
-                    if [[ "$file_header_printed" == "false" ]]; then
-                         msg "section" "Findings in $file:"
-                         file_header_printed=true
+                    VERIFIED_CREATOR=$(fetch_verified_creator "$repo")
+                    record_finding "$file" "$line_number" "$action" "$repo" "$current_version" "$latest_version" "" "$VERIFIED_CREATOR"
+
+                    if ! structured_output; then
+                        repo_display=$(verified_label "$repo" "$VERIFIED_CREATOR")
+
+                        if [[ "$file_header_printed" == "false" ]]; then
+                             msg "section" "Findings in $file:"
+                             file_header_printed=true
+                        fi
+                        echo "    ❗ $(msg "warning" "$repo_display is outdated (commit SHA):")"
+                        echo "      Line: $(msg "info" "$line_number")"
+                        echo "      Current: $(msg "warning" "$current_version")"
+                        echo "      Latest: $(msg "success" "$latest_version")"
+                        echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
+                        echo ""
                     fi
-                    echo "    ❗ $(msg "warning" "$repo is outdated (commit SHA):")"
-                    echo "      Line: $(msg "info" "$line_number")"
-                    echo "      Current: $(msg "warning" "$current_version")"
-                    echo "      Latest: $(msg "success" "$latest_version")"
-                    echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
-                    echo ""
                 fi
 
                 continue
             fi
 
             # Compare versions
-            current_major_minor_patch=$(echo "$current_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
-            latest_major_minor_patch=$(echo "$latest_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
+            current_major_minor_patch=$(version_number_prefix "$current_version")
+            latest_major_minor_patch=$(version_number_prefix "$latest_version")
 
             # If only MAJOR is specified, compare MAJOR
             if [[ "$current_version" =~ ^[0-9]+$ ]]; then
-                current_major=$(echo "$current_version" | grep -oP '^\d+')
-                latest_major=$(echo "$latest_version" | grep -oP '^\d+')
-                [[ "$current_major" == "$latest_major" ]] && continue
+                current_major=$(version_major "$current_version")
+                latest_major=$(version_major "$latest_version")
+                [[ -z "$latest_major" || "$current_major" == "$latest_major" ]] && continue
                 latest_version="$latest_major"
             fi
 
             if [[ -n "$current_major_minor_patch" && "$current_major_minor_patch" != "$latest_major_minor_patch" ]]; then
-                if [[ "$file_header_printed" == "false" ]]; then
-                     msg "section" "Findings in $file:"
-                     file_header_printed=true
+                COMPAT_SCORE=$(fetch_compat_score "$repo" "$current_version" "$latest_version")
+                VERIFIED_CREATOR=$(fetch_verified_creator "$repo")
+                record_finding "$file" "$line_number" "$action" "$repo" "$current_version" "$latest_version" "$COMPAT_SCORE" "$VERIFIED_CREATOR"
+
+                if ! structured_output; then
+                    repo_display=$(verified_label "$repo" "$VERIFIED_CREATOR")
+
+                    if [[ "$file_header_printed" == "false" ]]; then
+                         msg "section" "Findings in $file:"
+                         file_header_printed=true
+                    fi
+
+                    badge=$(format_badge "$COMPAT_SCORE")
+
+                    echo "    ❗ $(msg "warning" "$repo_display is outdated:")"
+                    echo "      Line: $(msg "info" "$line_number")"
+                    echo "      Current: $(msg "warning" "$current_version")"
+                    echo "      Latest: $(msg "success" "$latest_version")"
+                    echo -e "      $badge"
+                    echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
+                    echo ""
                 fi
 
-                COMPAT_SCORE=$(fetch_compat_score "$repo" "$current_version" "$latest_version")
-                badge=$(format_badge "$COMPAT_SCORE")
-
-                echo "    ❗ $(msg "warning" "$repo is outdated:")"
-                echo "      Line: $(msg "info" "$line_number")"
-                echo "      Current: $(msg "warning" "$current_version")"
-                echo "      Latest: $(msg "success" "$latest_version")"
-                echo -e "      $badge"
-                echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
-                echo ""
-
                 if $UPDATE; then
-                    if [[ "$COMPAT_SCORE" =~ ^[0-9]+$ ]] && (( COMPAT_SCORE < 80 )) && ! $FORCE; then
-                        msg "warning" "      Skipping update of $repo to v$latest_version due to low compatibility score ($COMPAT_SCORE%). Use -f to force."
+                    if $VERIFIED_CREATORS_ONLY && [[ "$VERIFIED_CREATOR" != "true" ]]; then
+                        if ! structured_output; then
+                            msg "warning" "      Skipping update of $repo because it is not from a GitHub Marketplace verified creator. Run without -t to include it."
+                        fi
+                    elif [[ "$COMPAT_SCORE" =~ ^[0-9]+$ ]] && (( COMPAT_SCORE < 80 )) && ! $FORCE; then
+                        if ! structured_output; then
+                            msg "warning" "      Skipping update of $repo to v$latest_version due to low compatibility score ($COMPAT_SCORE%). Use -f to force."
+                        fi
                     else
                         update_action_ref "$file" "$repo" "$current_version" "$latest_version"
                     fi
                 fi
             else
-                $VERBOSE && msg "success" "  ✅ $repo is up-to-date ($current_version)"
+                ! structured_output && $VERBOSE && msg "success" "  ✅ $repo is up-to-date ($current_version)"
             fi
         done < <(yq -r '.jobs.*.steps[] | select(.uses) | [filename + ":" + (line), .uses] | @tsv' "$file")
 
@@ -618,7 +1221,8 @@ if $UPDATE || $PUSH_PR || [[ -n "$TARGET_BRANCH" ]]; then
     prepare_git_mode
 fi
 
-if ! $VERBOSE && ! $UPDATE && ! $PUSH_PR; then
+if ! structured_output && ! $VERBOSE && ! $UPDATE && ! $PUSH_PR; then
+    msg "status" "Checking $(pwd)"
     spinner scan_files
     msg "success" "Finished."
 else
@@ -628,9 +1232,15 @@ fi
 if $PUSH_PR; then
     commit_push_pr
 elif $UPDATE; then
-    if (( UPDATE_COUNT == 0 )); then
-        msg "status" "No workflow updates were made."
-    else
-        msg "success" "Updated $UPDATE_COUNT action reference(s)."
+    if ! structured_output; then
+        if (( UPDATE_COUNT == 0 )); then
+            msg "status" "No workflow updates were made."
+        else
+            msg "success" "Updated $UPDATE_COUNT action reference(s)."
+        fi
     fi
+fi
+
+if structured_output; then
+    render_report
 fi
