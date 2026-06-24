@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT=$(git rev-parse --show-toplevel)
+SCRIPT="$ROOT/actions-snitch"
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/actions-snitch-lint-test.XXXXXXXXXX")
+
+cleanup() {
+  rm -rf "$TMP_ROOT"
+}
+trap cleanup EXIT
+
+fail() {
+  printf 'lint-test: %s\n' "$*" >&2
+  exit 1
+}
+
+run_shellcheck() {
+  shellcheck --color=always "$SCRIPT" "$ROOT/.github/scripts/lint-test"
+}
+
+run_syntax_checks() {
+  bash -n "$SCRIPT"
+  bash -n "$ROOT/.github/scripts/lint-test"
+}
+
+write_stubs() {
+  local bindir="$1"
+  local score="$2"
+  local pr_log="${3:-}"
+
+  mkdir -p "$bindir"
+
+  cat > "$bindir/gh" <<GH
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "\${1:-}" == "api" && "\${2:-}" == "repos/actions/checkout/releases/latest" ]]; then
+  printf 'v4\\n'
+elif [[ "\${1:-}" == "pr" && "\${2:-}" == "create" ]]; then
+  printf '%s\\n' "\$*" > "$pr_log"
+else
+  printf 'unexpected gh args: %s\\n' "\$*" >&2
+  exit 1
+fi
+GH
+
+  cat > "$bindir/curl" <<CURL
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\\n' '<svg><title>compatibility: $score%</title></svg>'
+CURL
+
+  chmod +x "$bindir/gh" "$bindir/curl"
+}
+
+init_workflow_repo() {
+  local repo="$1"
+
+  mkdir -p "$repo/.github/workflows"
+  cat > "$repo/.github/workflows/build.yml" <<'YAML'
+name: test
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+YAML
+
+  git -C "$repo" init -q
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  git -C "$repo" add .github/workflows/build.yml
+  git -C "$repo" commit -q -m init
+}
+
+workflow_ref() {
+  local repo="$1"
+  grep 'uses:' "$repo/.github/workflows/build.yml"
+}
+
+test_option_validation() {
+  local output
+  local option_output="$TMP_ROOT/option-validation.out"
+
+  output=$("$SCRIPT" -h)
+  [[ "$output" == *"Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-v] [-h]"* ]] ||
+    fail "help output does not document the expected usage"
+
+  if "$SCRIPT" -b sample >"$option_output" 2>&1; then
+    fail "-b without -u or -p unexpectedly succeeded"
+  fi
+
+  output=$(cat "$option_output")
+  [[ "$output" == *"Error: -b can only be used with -u or -p"* ]] ||
+    fail "-b without -u or -p did not print the expected error"
+}
+
+test_update_in_place() {
+  local case_dir="$TMP_ROOT/update-in-place"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u >/dev/null)
+
+  [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+    fail "-u did not update the workflow in-place"
+  [[ "$(git -C "$repo" rev-list --count HEAD)" == "1" ]] ||
+    fail "-u should not create a commit"
+  [[ "$(git -C "$repo" branch --show-current)" == "main" ]] ||
+    fail "-u should stay on the current branch"
+}
+
+test_update_branch_creation() {
+  local case_dir="$TMP_ROOT/update-branch"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u -b actions-update >/dev/null)
+
+  [[ "$(git -C "$repo" branch --show-current)" == "actions-update" ]] ||
+    fail "-u -b did not switch to the target branch"
+  [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+    fail "-u -b did not update the workflow"
+  [[ "$(git -C "$repo" rev-list --count HEAD)" == "1" ]] ||
+    fail "-u -b should not create a commit"
+}
+
+test_force_gate() {
+  local skip_dir="$TMP_ROOT/force-skip"
+  local force_dir="$TMP_ROOT/force-apply"
+
+  mkdir -p "$skip_dir/repo" "$force_dir/repo"
+  write_stubs "$skip_dir/bin" 50
+  write_stubs "$force_dir/bin" 50
+  init_workflow_repo "$skip_dir/repo"
+  init_workflow_repo "$force_dir/repo"
+
+  (cd "$skip_dir/repo" && PATH="$skip_dir/bin:$PATH" XDG_CACHE_HOME="$skip_dir/cache" "$SCRIPT" -u >/dev/null)
+  [[ "$(workflow_ref "$skip_dir/repo")" == *"actions/checkout@v2"* ]] ||
+    fail "-u should skip low compatibility updates"
+
+  (cd "$force_dir/repo" && PATH="$force_dir/bin:$PATH" XDG_CACHE_HOME="$force_dir/cache" "$SCRIPT" -u -f >/dev/null)
+  [[ "$(workflow_ref "$force_dir/repo")" == *"actions/checkout@v4"* ]] ||
+    fail "-u -f should apply low compatibility updates"
+}
+
+test_pr_flow() {
+  local case_dir="$TMP_ROOT/pr-flow"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local origin="$case_dir/origin.git"
+  local pr_log="$case_dir/pr.log"
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90 "$pr_log"
+  init_workflow_repo "$repo"
+  git init --bare -q "$origin"
+  git -C "$repo" remote add origin "$origin"
+  git -C "$repo" push -q -u origin main
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -b actions-update >/dev/null)
+
+  [[ "$(git -C "$repo" branch --show-current)" == "actions-update" ]] ||
+    fail "-p -b did not switch to the target branch"
+  [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+    fail "-p -b did not update the workflow"
+  [[ "$(git -C "$repo" rev-list --count HEAD)" == "2" ]] ||
+    fail "-p -b should create one commit"
+  [[ -z "$(git -C "$repo" status --short)" ]] ||
+    fail "-p -b should leave the worktree clean"
+  git --git-dir="$origin" show-ref --verify --quiet refs/heads/actions-update ||
+    fail "-p -b did not push the target branch"
+  [[ "$(cat "$pr_log")" == *"--head actions-update --base main"* ]] ||
+    fail "-p -b did not create a PR for the target branch"
+}
+
+run_shellcheck
+run_syntax_checks
+test_option_validation
+test_update_in_place
+test_update_branch_creation
+test_force_gate
+test_pr_flow
+
+printf 'lint-test passed\n'

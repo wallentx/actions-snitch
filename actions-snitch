@@ -40,11 +40,12 @@ msg() {
 
 # Function to display usage
 usage() {
-    msg "header" "Usage: actions-snitch [-u] [-f] [-p] [-v] [-h]"
+    msg "header" "Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-v] [-h]"
     msg "help" "Options:"
-    msg "success" "  -u    Update outdated actions by creating a new branch and committing changes"
-    msg "success" "  -f    Force update outdated actions regardless of compatibility score (requires -u)"
-    msg "success" "  -p    Push changes and create a pull request (requires -u)"
+    msg "success" "  -u    Update outdated actions in-place"
+    msg "success" "  -f    Force updates regardless of compatibility score (requires -u or -p)"
+    msg "success" "  -p    Commit, push, and create a pull request after updating actions (implies -u)"
+    msg "success" "  -b    Branch to update or create before applying changes (requires -u or -p)"
     msg "success" "  -v    Verbose output - show skipped actions"
     msg "success" "  -h    Display this help message"
     echo ""
@@ -52,7 +53,7 @@ usage() {
 }
 
 # Ensure required tools are installed
-for cmd in gh jq yq curl; do
+for cmd in gh jq yq curl git; do
     if ! command -v $cmd &>/dev/null; then
         msg "error" "Error: $cmd is not installed."
         exit 1
@@ -63,32 +64,134 @@ done
 UPDATE=false
 FORCE=false
 PUSH_PR=false
-VERBOSE=false
+TARGET_BRANCH=""
+VERBOSITY=0
 
-while getopts ":ufphv" opt; do
+while getopts ":ufpb:hv" opt; do
   case $opt in
     u) UPDATE=true ;;
     f) FORCE=true ;;
     p) PUSH_PR=true ;;
-    v) VERBOSE=true ;;
+    b) TARGET_BRANCH="$OPTARG" ;;
+    v) ((VERBOSITY++)) ;;
     h) usage ;;
     \?) msg "error" "Invalid option -$OPTARG" >&2; usage ;;
+    :) msg "error" "Option -$OPTARG requires an argument" >&2; usage ;;
   esac
 done
 
-if $VERBOSE; then
+if $PUSH_PR; then
+  UPDATE=true
+fi
+
+if (( VERBOSITY >= 2 )); then
   set -x
 fi
 
+VERBOSE=false
+if (( VERBOSITY >= 1 )); then
+    VERBOSE=true
+fi
+
 if $FORCE && ! $UPDATE; then
-  msg "error" "Error: -f can only be used with -u"
+  msg "error" "Error: -f can only be used with -u or -p"
   exit 1
 fi
 
-if $PUSH_PR && ! $UPDATE; then
-  msg "error" "Error: -p can only be used with -u"
+if [[ -n "$TARGET_BRANCH" ]] && ! $UPDATE; then
+  msg "error" "Error: -b can only be used with -u or -p"
   exit 1
 fi
+
+# Spinner setup
+SPINNER_TMPFILES=()
+
+spinner_cleanup() {
+  tput cnorm 2> /dev/null
+  local tmpout
+  for tmpout in "${SPINNER_TMPFILES[@]}"; do
+    rm -f "$tmpout" 2> /dev/null
+  done
+}
+
+spin()
+{
+  local p=${1:-$!} head=$((1 > 0 ? -1 : 17)) _GI=0 out='' i actual_i char sim_len age denom gval idx esc=$'\e'
+  local g=() a=() s=(\  \  \  \  𝙻 𝙾 𝙰 𝙳 𝙸 𝙽 𝙶 . . . \  \  \ )
+  local greens256=(46 40 34 28 22 16) TRUECOLOR=0
+  case "${COLORTERM:-}" in *truecolor* | *24bit*) TRUECOLOR=1 ;; esac
+  for ((i = 0; i < 17; i++)); do g[i]='' a[i]=0; done
+  tput civis 2> /dev/null
+
+  while kill -0 "$p" 2> /dev/null; do
+    out=''
+    sim_len=17
+    ((head += 1))
+    if ((1 > 0)); then
+      if ((head >= sim_len)); then
+        head=0
+        if ((0)); then for ((i = 0; i < 17; i++)); do g[i]='' a[i]=0; done; fi
+      fi
+    else
+      if ((head < 0)); then
+        head=$((sim_len - 1))
+        if ((0)); then for ((i = 0; i < 17; i++)); do g[i]='' a[i]=0; done; fi
+      fi
+    fi
+    for ((i = 0; i < 17; i++)); do
+      [[ -n "${g[i]:-}" ]] || continue
+      : "${a[i]:=0}"
+      ((a[i]++))
+      if ((a[i] >= 11)); then g[i]='' a[i]=0; fi
+    done
+    g[head]="${s[_GI]}"
+    _GI=$(((_GI + 1) % ${#s[@]}))
+    a[head]=0
+    for ((i = 0; i < 17; i++)); do
+      actual_i=$i char=''
+      if [[ -n "${g[actual_i]:-}" ]]; then
+        char="${g[actual_i]}"
+        age=${a[actual_i]:-0}
+        if ((TRUECOLOR)); then
+          denom=$((11 - 1))
+          ((denom <= 0)) && denom=1
+          gval=$((255 - (255 * age) / denom))
+          ((gval < 0)) && gval=0
+          ((gval > 255)) && gval=255
+          out+="${esc}[38;2;0;${gval};0m${char}${esc}[0m"
+        else
+          denom=$((11 - 1))
+          ((denom <= 0)) && denom=1
+          idx=$((age * (${#greens256[@]} - 1) / denom))
+          ((idx < 0)) && idx=0
+          ((idx >= ${#greens256[@]})) && idx=$((${#greens256[@]} - 1))
+          out+="${esc}[38;5;${greens256[idx]}m${char}${esc}[0m"
+        fi
+      else out+=' '; fi
+    done
+    printf "%s\r" "$out"
+    sleep 0.040
+  done
+  printf '%b\r' "${esc}[2K"
+  tput cnorm 2> /dev/null
+  wait "$p"
+}
+
+spinner() {
+  local tmpout status=0
+
+  tmpout=$(mktemp "${TMPDIR:-/tmp}/tmpXXXXXXXXXX") || return 1
+  SPINNER_TMPFILES+=("$tmpout")
+
+  "$@" > "$tmpout" 2>&1 &
+  spin "$!" || status=$?
+  printf '\r'
+  cat "$tmpout"
+  rm -f "$tmpout"
+  return "$status"
+}
+
+trap spinner_cleanup INT EXIT
 
 # Cache setup
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/actions-snitch"
@@ -150,7 +253,7 @@ cached_gh_api() {
     fi
     
     if ! result=$(gh api "$endpoint" --jq "$jq_query" 2>/dev/null); then
-        $VERBOSE && msg "error" "  Failed to fetch data from GitHub API: $endpoint"
+        $VERBOSE && msg "error" "  Failed to fetch data from GitHub API: $endpoint" >&2
         return 1
     fi
 
@@ -160,7 +263,7 @@ cached_gh_api() {
         return 0
     fi
 
-    $VERBOSE && msg "error" "  No data returned from GitHub API: $endpoint"
+    $VERBOSE && msg "error" "  No data returned from GitHub API: $endpoint" >&2
     return 1
 }
 
@@ -180,8 +283,10 @@ fetch_compat_score() {
     fi
 
     local badge_url="https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=${repo_name}&package-manager=github_actions&previous-version=${current_version}&new-version=${latest_version}"
-    local svg_content=$(curl -s "$badge_url")
-    local score=$(echo "$svg_content" | grep -oP '<title>compatibility: \K\d+(?=%)' || echo "Unknown")
+    local svg_content
+    local score
+    svg_content=$(curl -s "$badge_url")
+    score=$(echo "$svg_content" | grep -oP '<title>compatibility: \K\d+(?=%)' || echo "Unknown")
     
     set_cached_value "$cache_key" "$score"
     echo "$score"
@@ -211,141 +316,321 @@ format_badge() {
     echo -e "$badge"
 }
 
-# Main logic
-declare -A findings  # Associative array to store findings per file
+UPDATED_ACTIONS=()
+UPDATE_COUNT=0
 
-while IFS= read -r file; do
-    file_has_findings=false
-    file_findings=""
+is_interactive() {
+    [[ -t 0 && -t 1 ]]
+}
 
-    # Debug output in verbose mode
-    $VERBOSE && msg "info" "Checking file: $file"
+git_worktree_clean() {
+    [[ -z "$(git status --porcelain)" ]]
+}
 
-    # First check if the file has any actions
-    if ! yq -e '.jobs.*.steps[].uses' "$file" >/dev/null 2>&1; then
-        $VERBOSE && msg "status" "  No actions found in $file"
-        continue
+ensure_clean_worktree() {
+    local message="$1"
+
+    if ! git_worktree_clean; then
+        msg "error" "$message"
+        git status --short
+        exit 1
+    fi
+}
+
+current_git_branch() {
+    local branch
+    branch=$(git branch --show-current)
+
+    if [[ -z "$branch" ]]; then
+        msg "error" "Error: actions-snitch needs a named git branch for branch or PR operations."
+        exit 1
     fi
 
-    # Use process substitution and a while loop to read the output
-    while IFS=$'\t' read -r location action; do
-        [[ -z "$action" ]] && continue
-        
-        # Extract line number from location (format: filename:line)
-        line_number=$(echo "$location" | cut -d':' -f2)
-        
+    echo "$branch"
+}
+
+prepare_branch() {
+    local branch="$1"
+    local current_branch
+    current_branch=$(current_git_branch)
+
+    if [[ "$branch" == "$current_branch" ]]; then
+        return
+    fi
+
+    ensure_clean_worktree "Error: cannot switch to branch '$branch' with a dirty worktree."
+
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        git checkout "$branch"
+    elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+        git checkout --track "origin/$branch"
+    else
+        git checkout -b "$branch"
+    fi
+
+    if $PUSH_PR; then
+        ensure_clean_worktree "Error: branch '$branch' is dirty; refusing to create a PR with unrelated changes."
+    fi
+}
+
+prompt_for_pr_branch() {
+    local answer branch default_branch="actions-snitch/update-actions"
+
+    if ! $PUSH_PR || [[ -n "$TARGET_BRANCH" ]] || ! is_interactive; then
+        return
+    fi
+
+    printf "Create a new branch before applying updates and opening the PR? [Y/n] "
+    read -r answer
+
+    case "${answer,,}" in
+        n|no)
+            return
+            ;;
+    esac
+
+    printf "Branch name [%s]: " "$default_branch"
+    read -r branch
+    TARGET_BRANCH="${branch:-$default_branch}"
+}
+
+prepare_git_mode() {
+    if $PUSH_PR; then
+        ensure_clean_worktree "Error: -p requires a clean worktree before actions-snitch modifies workflows."
+        prompt_for_pr_branch
+    fi
+
+    if [[ -n "$TARGET_BRANCH" ]]; then
+        prepare_branch "$TARGET_BRANCH"
+    fi
+}
+
+update_action_ref() {
+    local file="$1"
+    local repo="$2"
+    local current_version="$3"
+    local latest_version="$4"
+
+    sed -i "s|${repo}@v*${current_version}|${repo}@v${latest_version}|g" "$file"
+    UPDATE_COUNT=$((UPDATE_COUNT + 1))
+    UPDATED_ACTIONS+=("$repo|$current_version|$latest_version|$file")
+    msg "success" "      Updated $repo from $current_version to $latest_version"
+}
+
+build_pr_body() {
+    local update repo current_version latest_version file
+
+    printf "Updates GitHub Actions detected by actions-snitch.\n\n"
+    printf "| Action | From | To | File |\n"
+    printf "| --- | --- | --- | --- |\n"
+
+    for update in "${UPDATED_ACTIONS[@]}"; do
+        IFS='|' read -r repo current_version latest_version file <<< "$update"
+        printf "| %s | %s | %s | %s |\n" "$repo" "$current_version" "$latest_version" "$file"
+    done
+}
+
+commit_push_pr() {
+    local branch title pr_body update repo current_version latest_version file
+
+    if ! $PUSH_PR; then
+        return
+    fi
+
+    if (( UPDATE_COUNT == 0 )); then
+        msg "status" "No workflow updates were made; skipping commit, push, and PR creation."
+        return
+    fi
+
+    if git diff --quiet -- .github/workflows; then
+        msg "status" "No workflow file changes detected; skipping commit, push, and PR creation."
+        return
+    fi
+
+    git add .github/workflows
+
+    if git diff --cached --quiet; then
+        msg "status" "No staged workflow changes detected; skipping commit, push, and PR creation."
+        return
+    fi
+
+    branch=$(current_git_branch)
+
+    if (( UPDATE_COUNT == 1 )); then
+        update="${UPDATED_ACTIONS[0]}"
+        IFS='|' read -r repo current_version latest_version file <<< "$update"
+        title="Bump $repo from $current_version to $latest_version"
+    else
+        title="Bump GitHub Actions dependencies"
+    fi
+
+    pr_body=$(build_pr_body)
+
+    git commit -m "$title"
+    git push -u origin "$branch"
+    gh pr create --title "$title" \
+                 --body "$pr_body" \
+                 --head "$branch" \
+                 --base "main"
+}
+
+# Main scanning logic
+scan_files() {
+    while IFS= read -r file; do
+        file_header_printed=false
+
         # Debug output in verbose mode
-        $VERBOSE && msg "info" "Found action at line $line_number: $action"
-        
-        repo=$(echo "$action" | cut -d'@' -f1)
-        current_version=$(echo "$action" | cut -d'@' -f2 | sed 's/^v//')  # Remove leading 'v'
+        $VERBOSE && msg "info" "Checking file: $file"
 
-        [[ "$repo" == *"docker://"* ]] && continue
-
-        # Skip internal/private repository paths
-        if [[ "$repo" == *"/"*"/"*"/"* ]]; then
-            $VERBOSE && msg "status" "  🔒 Skipping internal action: $repo"
+        # First check if the file has any actions
+        if ! yq -e '.jobs.*.steps[].uses' "$file" >/dev/null 2>&1; then
+            $VERBOSE && msg "status" "  No actions found in $file"
             continue
         fi
 
-        # Skip branches like 'main' or 'master'
-        if [[ "$current_version" =~ ^(main|master)$ ]]; then
-            $VERBOSE && msg "status" "  🚫 Skipping $repo targeting branch '$current_version'"
-            continue
-        fi
+        # Use process substitution and a while loop to read the output
+        while IFS=$'\t' read -r location action; do
+            [[ -z "$action" ]] && continue
+            
+            # Extract line number from location (format: filename:line)
+            line_number=$(echo "$location" | cut -d':' -f2)
+            
+            # Debug output in verbose mode
+            $VERBOSE && msg "info" "Found action at line $line_number: $action"
+            
+            full_action_path=$(echo "$action" | cut -d'@' -f1)
+            # Extract owner/repo (first two components)
+            repo=$(echo "$full_action_path" | cut -d'/' -f1,2)
+            current_version=$(echo "$action" | cut -d'@' -f2 | sed 's/^v//')  # Remove leading 'v'
 
-        # Use cached API calls
-        latest_version=$(cached_gh_api "repos/${repo}/releases/latest" '.tag_name' | sed 's/^v//')
-        latest_version=${latest_version:-$(cached_gh_api "repos/${repo}" '.default_branch')}
+            [[ "$full_action_path" == *"docker://"* ]] && continue
 
-        # Handle commit SHAs
-        if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then
-            latest_sha=$(cached_gh_api "repos/${repo}/commits/${latest_version}" '.sha')
-
-            # Cache the commit diff calculation
-            commit_diff_cache_key=$(get_cache_key "commit_diff:${repo}:${current_version}:${latest_sha}")
-            if ! commit_diff=$(get_cached_value "$commit_diff_cache_key"); then
-                temp_dir=$(mktemp -d)
-                git clone --depth=1 https://github.com/$repo.git "$temp_dir" >/dev/null 2>&1
-
-                (
-                    cd "$temp_dir"
-                    git fetch origin "$current_version" >/dev/null 2>&1
-                    commit_diff=$(git rev-list --count "${current_version}..${latest_sha}" 2>/dev/null)
-                )
-
-                rm -rf "$temp_dir"
-                set_cached_value "$commit_diff_cache_key" "$commit_diff"
+            # Skip internal/private repository paths
+            if [[ "$full_action_path" == *"/"*"/"*"/"* ]]; then
+                $VERBOSE && msg "status" "  🔒 Skipping internal action: $full_action_path"
+                continue
             fi
 
-            if [[ "$commit_diff" -gt 0 ]]; then
-                file_has_findings=true
-                file_findings+="    ❗ $(msg "warning" "$repo is outdated (commit SHA):")\n"
-                file_findings+="      Line: $(msg "info" "$line_number")\n"
-                file_findings+="      Current: $(msg "warning" "$current_version")\n"
-                file_findings+="      Latest: $(msg "success" "$latest_version")\n"
-                file_findings+="      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")\n\n"
+            # Skip branches like 'main' or 'master'
+            if [[ "$current_version" =~ ^(main|master)$ ]]; then
+                $VERBOSE && msg "status" "  🚫 Skipping $repo targeting branch '$current_version'"
+                continue
             fi
 
-            continue
-        fi
+            # Use cached API calls
+            if latest_tag=$(cached_gh_api "repos/${repo}/releases/latest" '.tag_name'); then
+                 latest_version="${latest_tag#v}"
+            elif default_branch=$(cached_gh_api "repos/${repo}" '.default_branch'); then
+                 latest_version="$default_branch"
+            else
+                 $VERBOSE && msg "warning" "  Unable to determine latest version for $repo" >&2
+                 continue
+            fi
 
-        # Compare versions
-        current_major_minor_patch=$(echo "$current_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
-        latest_major_minor_patch=$(echo "$latest_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
+            # Handle commit SHAs
+            if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then
+                if ! latest_sha=$(cached_gh_api "repos/${repo}/commits/${latest_version}" '.sha'); then
+                     $VERBOSE && msg "warning" "  Unable to determine SHA for $repo version $latest_version" >&2
+                     continue
+                fi
 
-        # If only MAJOR is specified, compare MAJOR
-        if [[ "$current_version" =~ ^[0-9]+$ ]]; then
-            current_major=$(echo "$current_version" | grep -oP '^\d+')
-            latest_major=$(echo "$latest_version" | grep -oP '^\d+')
-            [[ "$current_major" == "$latest_major" ]] && continue
-            latest_version="$latest_major"
-        fi
+                # Cache the commit diff calculation
+                commit_diff_cache_key=$(get_cache_key "commit_diff:${repo}:${current_version}:${latest_sha}")
+                if ! commit_diff=$(get_cached_value "$commit_diff_cache_key"); then
+                    temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/actions-snitch.XXXXXXXXXX")
+                    git clone --depth=1 "https://github.com/${repo}.git" "$temp_dir" >/dev/null 2>&1
 
-        if [[ -n "$current_major_minor_patch" && "$current_major_minor_patch" != "$latest_major_minor_patch" ]]; then
-            COMPAT_SCORE=$(fetch_compat_score "$repo" "$current_version" "$latest_version")
-            badge=$(format_badge "$COMPAT_SCORE")
+                    if ! commit_diff=$(
+                        cd "$temp_dir" &&
+                        git fetch origin "$current_version" >/dev/null 2>&1 &&
+                        git rev-list --count "${current_version}..${latest_sha}" 2>/dev/null
+                    ); then
+                        commit_diff=0
+                    fi
 
-            file_has_findings=true
-            file_findings+="    ❗ $(msg "warning" "$repo is outdated:")\n"
-            file_findings+="      Line: $(msg "info" "$line_number")\n"
-            file_findings+="      Current: $(msg "warning" "$current_version")\n"
-            file_findings+="      Latest: $(msg "success" "$latest_version")\n"
-            file_findings+="      $badge\n"
-            file_findings+="      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")\n\n"
+                    rm -rf "$temp_dir"
+                    set_cached_value "$commit_diff_cache_key" "$commit_diff"
+                fi
 
-            if $UPDATE; then
-                if [[ "$COMPAT_SCORE" =~ ^[0-9]+$ ]] && (( COMPAT_SCORE < 80 )) && ! $FORCE; then
-                    $VERBOSE && msg "warning" "    ⚠️ Skipping automatic update of $repo to v$latest_version due to low compatibility score ($COMPAT_SCORE%). Use -f to force."
-                else
-                    branch="actions-snitch/${repo//\//-}-$latest_version"
-                    git checkout -b "$branch"
-                    sed -i "s|${repo}@v*${current_version}|${repo}@v${latest_version}|g" "$file"
-                    git add "$file"
-                    git commit -m "Bump $repo from $current_version to $latest_version"
+                if [[ "$commit_diff" -gt 0 ]]; then
+                    if [[ "$file_header_printed" == "false" ]]; then
+                         msg "section" "Findings in $file:"
+                         file_header_printed=true
+                    fi
+                    echo "    ❗ $(msg "warning" "$repo is outdated (commit SHA):")"
+                    echo "      Line: $(msg "info" "$line_number")"
+                    echo "      Current: $(msg "warning" "$current_version")"
+                    echo "      Latest: $(msg "success" "$latest_version")"
+                    echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
+                    echo ""
+                fi
 
-                    if $PUSH_PR; then
-                        git push -u origin "$branch"
-                        PR_BODY="Bumps [$repo](https://github.com/$repo) from $current_version to $latest_version."
-                        gh pr create --title "Bump $repo from $current_version to $latest_version" \
-                                     --body "$PR_BODY" \
-                                     --head "$branch" \
-                                     --base "main"
+                continue
+            fi
+
+            # Compare versions
+            current_major_minor_patch=$(echo "$current_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
+            latest_major_minor_patch=$(echo "$latest_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
+
+            # If only MAJOR is specified, compare MAJOR
+            if [[ "$current_version" =~ ^[0-9]+$ ]]; then
+                current_major=$(echo "$current_version" | grep -oP '^\d+')
+                latest_major=$(echo "$latest_version" | grep -oP '^\d+')
+                [[ "$current_major" == "$latest_major" ]] && continue
+                latest_version="$latest_major"
+            fi
+
+            if [[ -n "$current_major_minor_patch" && "$current_major_minor_patch" != "$latest_major_minor_patch" ]]; then
+                if [[ "$file_header_printed" == "false" ]]; then
+                     msg "section" "Findings in $file:"
+                     file_header_printed=true
+                fi
+
+                COMPAT_SCORE=$(fetch_compat_score "$repo" "$current_version" "$latest_version")
+                badge=$(format_badge "$COMPAT_SCORE")
+
+                echo "    ❗ $(msg "warning" "$repo is outdated:")"
+                echo "      Line: $(msg "info" "$line_number")"
+                echo "      Current: $(msg "warning" "$current_version")"
+                echo "      Latest: $(msg "success" "$latest_version")"
+                echo -e "      $badge"
+                echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
+                echo ""
+
+                if $UPDATE; then
+                    if [[ "$COMPAT_SCORE" =~ ^[0-9]+$ ]] && (( COMPAT_SCORE < 80 )) && ! $FORCE; then
+                        msg "warning" "      Skipping update of $repo to v$latest_version due to low compatibility score ($COMPAT_SCORE%). Use -f to force."
+                    else
+                        update_action_ref "$file" "$repo" "$current_version" "$latest_version"
                     fi
                 fi
+            else
+                $VERBOSE && msg "success" "  ✅ $repo is up-to-date ($current_version)"
             fi
-        else
-            $VERBOSE && msg "success" "  ✅ $repo is up-to-date ($current_version)"
-        fi
-    done < <(yq -r '.jobs.*.steps[] | select(.uses) | [filename + ":" + (line), .uses] | @tsv' "$file")
+        done < <(yq -r '.jobs.*.steps[] | select(.uses) | [filename + ":" + (line), .uses] | @tsv' "$file")
 
-    # If file had findings, print the file header and all findings
-    if [[ "$file_has_findings" == "true" ]]; then
-        msg "section" "Findings in $file:"
-        echo -e "$file_findings"
+    done < <(find .github/workflows -name '*.yml')
+    return 0
+}
+
+# Run logic
+if $UPDATE || $PUSH_PR || [[ -n "$TARGET_BRANCH" ]]; then
+    prepare_git_mode
+fi
+
+if ! $VERBOSE && ! $UPDATE && ! $PUSH_PR; then
+    spinner scan_files
+    msg "success" "Finished."
+else
+    scan_files
+fi
+
+if $PUSH_PR; then
+    commit_push_pr
+elif $UPDATE; then
+    if (( UPDATE_COUNT == 0 )); then
+        msg "status" "No workflow updates were made."
+    else
+        msg "success" "Updated $UPDATE_COUNT action reference(s)."
     fi
-done < <(find .github/workflows -name '*.yml')
-
-if $VERBOSE; then
-    set +x
 fi
