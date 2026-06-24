@@ -40,9 +40,10 @@ msg() {
 
 # Function to display usage
 usage() {
-    msg "header" "Usage: actions-snitch [-u] [-p] [-v] [-h]"
+    msg "header" "Usage: actions-snitch [-u] [-f] [-p] [-v] [-h]"
     msg "help" "Options:"
     msg "success" "  -u    Update outdated actions by creating a new branch and committing changes"
+    msg "success" "  -f    Force update outdated actions regardless of compatibility score (requires -u)"
     msg "success" "  -p    Push changes and create a pull request (requires -u)"
     msg "success" "  -v    Verbose output - show skipped actions"
     msg "success" "  -h    Display this help message"
@@ -60,12 +61,14 @@ done
 
 # Parse flags
 UPDATE=false
+FORCE=false
 PUSH_PR=false
 VERBOSITY=0
 
-while getopts ":uphv" opt; do
+while getopts ":ufphv" opt; do
   case $opt in
     u) UPDATE=true ;;
+    f) FORCE=true ;;
     p) PUSH_PR=true ;;
     v) ((VERBOSITY++)) ;;
     h) usage ;;
@@ -80,6 +83,11 @@ fi
 VERBOSE=false
 if (( VERBOSITY >= 1 )); then
     VERBOSE=true
+fi
+
+if $FORCE && ! $UPDATE; then
+  msg "error" "Error: -f can only be used with -u"
+  exit 1
 fi
 
 if $PUSH_PR && ! $UPDATE; then
@@ -363,19 +371,23 @@ scan_files() {
                 echo ""
 
                 if $UPDATE; then
-                    branch="actions-snitch/${repo//\//-}-$latest_version"
-                    git checkout -b "$branch"
-                    sed -i "s|${repo}@v*${current_version}|${repo}@v${latest_version}|g" "$file"
-                    git add "$file"
-                    git commit -m "Bump $repo from $current_version to $latest_version"
+                    if [[ "$COMPAT_SCORE" =~ ^[0-9]+$ ]] && (( COMPAT_SCORE < 80 )) && ! $FORCE; then
+                        $VERBOSE && msg "warning" "    ⚠️ Skipping automatic update of $repo to v$latest_version due to low compatibility score ($COMPAT_SCORE%). Use -f to force."
+                    else
+                        branch="actions-snitch/${repo//\//-}-$latest_version"
+                        git checkout -b "$branch"
+                        sed -i "s|${repo}@v*${current_version}|${repo}@v${latest_version}|g" "$file"
+                        git add "$file"
+                        git commit -m "Bump $repo from $current_version to $latest_version"
 
-                    if $PUSH_PR; then
-                        git push -u origin "$branch"
-                        PR_BODY="Bumps [$repo](https://github.com/$repo) from $current_version to $latest_version."
-                        gh pr create --title "Bump $repo from $current_version to $latest_version" \
-                                     --body "$PR_BODY" \
-                                     --head "$branch" \
-                                     --base "main"
+                        if $PUSH_PR; then
+                            git push -u origin "$branch"
+                            PR_BODY="Bumps [$repo](https://github.com/$repo) from $current_version to $latest_version."
+                            gh pr create --title "Bump $repo from $current_version to $latest_version" \
+                                         --body "$PR_BODY" \
+                                         --head "$branch" \
+                                         --base "main"
+                        fi
                     fi
                 fi
             else

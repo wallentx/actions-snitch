@@ -29,12 +29,13 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 ## Usage
 
 ```bash
-actions-snitch [-u] [-p] [-v] [-h]
+actions-snitch [-u] [-f] [-p] [-v] [-h]
 ```
 
 ### Options
 
 - `-u` Update outdated actions by creating a new branch and committing changes
+- `-f` Force update outdated actions regardless of compatibility score (requires -u)
 - `-p` Push changes and create a pull request (requires -u)
 - `-v` Verbose output - show skipped actions and debug info
 - `-h` Display help message
