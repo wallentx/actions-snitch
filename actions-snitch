@@ -61,26 +61,64 @@ done
 # Parse flags
 UPDATE=false
 PUSH_PR=false
-VERBOSE=false
+VERBOSITY=0
 
 while getopts ":uphv" opt; do
   case $opt in
     u) UPDATE=true ;;
     p) PUSH_PR=true ;;
-    v) VERBOSE=true ;;
+    v) ((VERBOSITY++)) ;;
     h) usage ;;
     \?) msg "error" "Invalid option -$OPTARG" >&2; usage ;;
   esac
 done
 
-if $VERBOSE; then
+if (( VERBOSITY >= 2 )); then
   set -x
+fi
+
+VERBOSE=false
+if (( VERBOSITY >= 1 )); then
+    VERBOSE=true
 fi
 
 if $PUSH_PR && ! $UPDATE; then
   msg "error" "Error: -p can only be used with -u"
   exit 1
 fi
+
+# Spinner setup
+TMPOUT=$(mktemp "${TMPDIR:-/tmp}/tmpXXXXXXXXXX")
+
+function shutdown() {
+  tput cnorm
+  rm -f "$TMPOUT"
+}
+trap shutdown INT EXIT
+
+function _cursorBack() {
+  echo -en "\033[$1D"
+}
+
+function _spinner() {
+  local LC_CTYPE=C
+  local LC_ALL=en_US.utf-8
+  tput civis
+  local CL="\e[2K"
+  local spin="⣷⣯⣟⡿⢿⣻⣽⣾"
+  local pid=$1
+  local charwidth=1
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    local i=$(((i + charwidth) % ${#spin}))
+    printf "%s" "$(tput setaf 2)${spin:i:charwidth}$(tput sgr0)"
+    _cursorBack 1
+    sleep .1
+  done
+  echo -ne "$CL"
+  tput cnorm
+  wait "$pid"
+}
 
 # Cache setup
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/actions-snitch"
@@ -142,7 +180,7 @@ cached_gh_api() {
     fi
     
     if ! result=$(gh api "$endpoint" --jq "$jq_query" 2>/dev/null); then
-        $VERBOSE && msg "error" "  Failed to fetch data from GitHub API: $endpoint"
+        $VERBOSE && msg "error" "  Failed to fetch data from GitHub API: $endpoint" >&2
         return 1
     fi
 
@@ -152,7 +190,7 @@ cached_gh_api() {
         return 0
     fi
 
-    $VERBOSE && msg "error" "  No data returned from GitHub API: $endpoint"
+    $VERBOSE && msg "error" "  No data returned from GitHub API: $endpoint" >&2
     return 1
 }
 
@@ -203,137 +241,157 @@ format_badge() {
     echo -e "$badge"
 }
 
-# Main logic
-declare -A findings  # Associative array to store findings per file
+# Main scanning logic
+scan_files() {
+    while IFS= read -r file; do
+        file_header_printed=false
 
-while IFS= read -r file; do
-    file_has_findings=false
-    file_findings=""
-
-    # Debug output in verbose mode
-    $VERBOSE && msg "info" "Checking file: $file"
-
-    # First check if the file has any actions
-    if ! yq -e '.jobs.*.steps[].uses' "$file" >/dev/null 2>&1; then
-        $VERBOSE && msg "status" "  No actions found in $file"
-        continue
-    fi
-
-    # Use process substitution and a while loop to read the output
-    while IFS=$'\t' read -r location action; do
-        [[ -z "$action" ]] && continue
-        
-        # Extract line number from location (format: filename:line)
-        line_number=$(echo "$location" | cut -d':' -f2)
-        
         # Debug output in verbose mode
-        $VERBOSE && msg "info" "Found action at line $line_number: $action"
-        
-        repo=$(echo "$action" | cut -d'@' -f1)
-        current_version=$(echo "$action" | cut -d'@' -f2 | sed 's/^v//')  # Remove leading 'v'
+        $VERBOSE && msg "info" "Checking file: $file"
 
-        [[ "$repo" == *"docker://"* ]] && continue
-
-        # Skip internal/private repository paths
-        if [[ "$repo" == *"/"*"/"*"/"* ]]; then
-            $VERBOSE && msg "status" "  🔒 Skipping internal action: $repo"
+        # First check if the file has any actions
+        if ! yq -e '.jobs.*.steps[].uses' "$file" >/dev/null 2>&1; then
+            $VERBOSE && msg "status" "  No actions found in $file"
             continue
         fi
 
-        # Skip branches like 'main' or 'master'
-        if [[ "$current_version" =~ ^(main|master)$ ]]; then
-            $VERBOSE && msg "status" "  🚫 Skipping $repo targeting branch '$current_version'"
-            continue
-        fi
+        # Use process substitution and a while loop to read the output
+        while IFS=$'\t' read -r location action; do
+            [[ -z "$action" ]] && continue
+            
+            # Extract line number from location (format: filename:line)
+            line_number=$(echo "$location" | cut -d':' -f2)
+            
+            # Debug output in verbose mode
+            $VERBOSE && msg "info" "Found action at line $line_number: $action"
+            
+            full_action_path=$(echo "$action" | cut -d'@' -f1)
+            # Extract owner/repo (first two components)
+            repo=$(echo "$full_action_path" | cut -d'/' -f1,2)
+            current_version=$(echo "$action" | cut -d'@' -f2 | sed 's/^v//')  # Remove leading 'v'
 
-        # Use cached API calls
-        latest_version=$(cached_gh_api "repos/${repo}/releases/latest" '.tag_name' | sed 's/^v//')
-        latest_version=${latest_version:-$(cached_gh_api "repos/${repo}" '.default_branch')}
+            [[ "$full_action_path" == *"docker://"* ]] && continue
 
-        # Handle commit SHAs
-        if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then
-            latest_sha=$(cached_gh_api "repos/${repo}/commits/${latest_version}" '.sha')
-
-            # Cache the commit diff calculation
-            commit_diff_cache_key=$(get_cache_key "commit_diff:${repo}:${current_version}:${latest_sha}")
-            if ! commit_diff=$(get_cached_value "$commit_diff_cache_key"); then
-                temp_dir=$(mktemp -d)
-                git clone --depth=1 https://github.com/$repo.git "$temp_dir" >/dev/null 2>&1
-
-                (
-                    cd "$temp_dir"
-                    git fetch origin "$current_version" >/dev/null 2>&1
-                    commit_diff=$(git rev-list --count "${current_version}..${latest_sha}" 2>/dev/null)
-                )
-
-                rm -rf "$temp_dir"
-                set_cached_value "$commit_diff_cache_key" "$commit_diff"
+            # Skip internal/private repository paths
+            if [[ "$full_action_path" == *"/"*"/"*"/"* ]]; then
+                $VERBOSE && msg "status" "  🔒 Skipping internal action: $full_action_path"
+                continue
             fi
 
-            if [[ "$commit_diff" -gt 0 ]]; then
-                file_has_findings=true
-                file_findings+="    ❗ $(msg "warning" "$repo is outdated (commit SHA):")\n"
-                file_findings+="      Line: $(msg "info" "$line_number")\n"
-                file_findings+="      Current: $(msg "warning" "$current_version")\n"
-                file_findings+="      Latest: $(msg "success" "$latest_version")\n"
-                file_findings+="      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")\n\n"
+            # Skip branches like 'main' or 'master'
+            if [[ "$current_version" =~ ^(main|master)$ ]]; then
+                $VERBOSE && msg "status" "  🚫 Skipping $repo targeting branch '$current_version'"
+                continue
             fi
 
-            continue
-        fi
+            # Use cached API calls
+            if latest_tag=$(cached_gh_api "repos/${repo}/releases/latest" '.tag_name'); then
+                 latest_version=$(echo "$latest_tag" | sed 's/^v//')
+            elif default_branch=$(cached_gh_api "repos/${repo}" '.default_branch'); then
+                 latest_version="$default_branch"
+            else
+                 $VERBOSE && msg "warning" "  Unable to determine latest version for $repo" >&2
+                 continue
+            fi
 
-        # Compare versions
-        current_major_minor_patch=$(echo "$current_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
-        latest_major_minor_patch=$(echo "$latest_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
-
-        # If only MAJOR is specified, compare MAJOR
-        if [[ "$current_version" =~ ^[0-9]+$ ]]; then
-            current_major=$(echo "$current_version" | grep -oP '^\d+')
-            latest_major=$(echo "$latest_version" | grep -oP '^\d+')
-            [[ "$current_major" == "$latest_major" ]] && continue
-            latest_version="$latest_major"
-        fi
-
-        if [[ -n "$current_major_minor_patch" && "$current_major_minor_patch" != "$latest_major_minor_patch" ]]; then
-            COMPAT_SCORE=$(fetch_compat_score "$repo" "$current_version" "$latest_version")
-            badge=$(format_badge "$COMPAT_SCORE")
-
-            file_has_findings=true
-            file_findings+="    ❗ $(msg "warning" "$repo is outdated:")\n"
-            file_findings+="      Line: $(msg "info" "$line_number")\n"
-            file_findings+="      Current: $(msg "warning" "$current_version")\n"
-            file_findings+="      Latest: $(msg "success" "$latest_version")\n"
-            file_findings+="      $badge\n"
-            file_findings+="      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")\n\n"
-
-            if $UPDATE; then
-                branch="actions-snitch/${repo//\//-}-$latest_version"
-                git checkout -b "$branch"
-                sed -i "s|${repo}@v*${current_version}|${repo}@v${latest_version}|g" "$file"
-                git add "$file"
-                git commit -m "Bump $repo from $current_version to $latest_version"
-
-                if $PUSH_PR; then
-                    git push -u origin "$branch"
-                    PR_BODY="Bumps [$repo](https://github.com/$repo) from $current_version to $latest_version."
-                    gh pr create --title "Bump $repo from $current_version to $latest_version" \
-                                 --body "$PR_BODY" \
-                                 --head "$branch" \
-                                 --base "main"
+            # Handle commit SHAs
+            if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then
+                if ! latest_sha=$(cached_gh_api "repos/${repo}/commits/${latest_version}" '.sha'); then
+                     $VERBOSE && msg "warning" "  Unable to determine SHA for $repo version $latest_version" >&2
+                     continue
                 fi
+
+                # Cache the commit diff calculation
+                commit_diff_cache_key=$(get_cache_key "commit_diff:${repo}:${current_version}:${latest_sha}")
+                if ! commit_diff=$(get_cached_value "$commit_diff_cache_key"); then
+                    temp_dir=$(mktemp -d)
+                    git clone --depth=1 https://github.com/$repo.git "$temp_dir" >/dev/null 2>&1
+
+                    (
+                        cd "$temp_dir"
+                        git fetch origin "$current_version" >/dev/null 2>&1
+                        commit_diff=$(git rev-list --count "${current_version}..${latest_sha}" 2>/dev/null)
+                    )
+
+                    rm -rf "$temp_dir"
+                    set_cached_value "$commit_diff_cache_key" "$commit_diff"
+                fi
+
+                if [[ "$commit_diff" -gt 0 ]]; then
+                    if [[ "$file_header_printed" == "false" ]]; then
+                         msg "section" "Findings in $file:"
+                         file_header_printed=true
+                    fi
+                    echo "    ❗ $(msg "warning" "$repo is outdated (commit SHA):")"
+                    echo "      Line: $(msg "info" "$line_number")"
+                    echo "      Current: $(msg "warning" "$current_version")"
+                    echo "      Latest: $(msg "success" "$latest_version")"
+                    echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
+                    echo ""
+                fi
+
+                continue
             fi
-        else
-            $VERBOSE && msg "success" "  ✅ $repo is up-to-date ($current_version)"
-        fi
-    done < <(yq -r '.jobs.*.steps[] | select(.uses) | [filename + ":" + (line), .uses] | @tsv' "$file")
 
-    # If file had findings, print the file header and all findings
-    if [[ "$file_has_findings" == "true" ]]; then
-        msg "section" "Findings in $file:"
-        echo -e "$file_findings"
-    fi
-done < <(find .github/workflows -name '*.yml')
+            # Compare versions
+            current_major_minor_patch=$(echo "$current_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
+            latest_major_minor_patch=$(echo "$latest_version" | grep -oP '^\d+(\.\d+)?(\.\d+)?')
 
-if $VERBOSE; then
-    set +x
+            # If only MAJOR is specified, compare MAJOR
+            if [[ "$current_version" =~ ^[0-9]+$ ]]; then
+                current_major=$(echo "$current_version" | grep -oP '^\d+')
+                latest_major=$(echo "$latest_version" | grep -oP '^\d+')
+                [[ "$current_major" == "$latest_major" ]] && continue
+                latest_version="$latest_major"
+            fi
+
+            if [[ -n "$current_major_minor_patch" && "$current_major_minor_patch" != "$latest_major_minor_patch" ]]; then
+                if [[ "$file_header_printed" == "false" ]]; then
+                     msg "section" "Findings in $file:"
+                     file_header_printed=true
+                fi
+
+                COMPAT_SCORE=$(fetch_compat_score "$repo" "$current_version" "$latest_version")
+                badge=$(format_badge "$COMPAT_SCORE")
+
+                echo "    ❗ $(msg "warning" "$repo is outdated:")"
+                echo "      Line: $(msg "info" "$line_number")"
+                echo "      Current: $(msg "warning" "$current_version")"
+                echo "      Latest: $(msg "success" "$latest_version")"
+                echo -e "      $badge"
+                echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
+                echo ""
+
+                if $UPDATE; then
+                    branch="actions-snitch/${repo//\//-}-$latest_version"
+                    git checkout -b "$branch"
+                    sed -i "s|${repo}@v*${current_version}|${repo}@v${latest_version}|g" "$file"
+                    git add "$file"
+                    git commit -m "Bump $repo from $current_version to $latest_version"
+
+                    if $PUSH_PR; then
+                        git push -u origin "$branch"
+                        PR_BODY="Bumps [$repo](https://github.com/$repo) from $current_version to $latest_version."
+                        gh pr create --title "Bump $repo from $current_version to $latest_version" \
+                                     --body "$PR_BODY" \
+                                     --head "$branch" \
+                                     --base "main"
+                    fi
+                fi
+            else
+                $VERBOSE && msg "success" "  ✅ $repo is up-to-date ($current_version)"
+            fi
+        done < <(yq -r '.jobs.*.steps[] | select(.uses) | [filename + ":" + (line), .uses] | @tsv' "$file")
+
+    done < <(find .github/workflows -name '*.yml')
+}
+
+# Run logic
+if ! $VERBOSE && ! $UPDATE && ! $PUSH_PR; then
+    scan_files &
+    pid=$!
+    _spinner $pid
+    msg "success" "Finished."
+else
+    scan_files
 fi
