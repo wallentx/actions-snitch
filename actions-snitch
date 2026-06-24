@@ -285,7 +285,7 @@ cached_gh_api() {
     local cache_key
     cache_key=$(get_cache_key "gh_api:$endpoint:$jq_query")
     
-    if cached_value=$(get_cached_value "$cache_key"); then
+    if cached_value=$(get_cached_value "$cache_key") && [[ -n "$cached_value" && "$cached_value" != "null" ]]; then
         echo "$cached_value"
         return 0
     fi
@@ -295,7 +295,7 @@ cached_gh_api() {
         return 1
     fi
 
-    if [[ -n "$result" ]]; then
+    if [[ -n "$result" && "$result" != "null" ]]; then
         set_cached_value "$cache_key" "$result"
         echo "$result"
         return 0
@@ -446,6 +446,17 @@ version_major() {
     fi
 }
 
+release_notes_url() {
+    local repo="$1"
+    local latest_version="$2"
+
+    if [[ -z "$(version_number_prefix "$latest_version")" ]]; then
+        return 1
+    fi
+
+    printf "%s/releases/tag/%s" "$(github_repo_url "$repo")" "$(github_version_ref "$latest_version")"
+}
+
 current_repo_name() {
     local top_level
 
@@ -512,6 +523,7 @@ json_finding() {
     local verified_creator="$8"
     local release_notes="$9"
     local -a compatibility_args
+    local -a release_notes_args
 
     if [[ "$compatibility_score" =~ ^[0-9]+$ ]]; then
         compatibility_args=(--argjson compatibility_score "$compatibility_score")
@@ -519,6 +531,12 @@ json_finding() {
         compatibility_args=(--arg compatibility_score "$compatibility_score")
     else
         compatibility_args=(--argjson compatibility_score null)
+    fi
+
+    if [[ -n "$release_notes" ]]; then
+        release_notes_args=(--arg release_notes "$release_notes")
+    else
+        release_notes_args=(--argjson release_notes null)
     fi
 
     jq -n \
@@ -530,7 +548,7 @@ json_finding() {
        --arg latest "$latest_version" \
        "${compatibility_args[@]}" \
        --argjson verified_creator "$verified_creator" \
-       --arg release_notes "$release_notes" \
+       "${release_notes_args[@]}" \
        '{
           file: $file,
           line: $line,
@@ -599,7 +617,11 @@ record_finding() {
     local latest_version="$6"
     local compatibility_score="$7"
     local verified_creator="$8"
-    local release_notes="https://github.com/$repo/releases/tag/v$latest_version"
+    local release_notes=""
+
+    if ! release_notes=$(release_notes_url "$repo" "$latest_version"); then
+        release_notes=""
+    fi
 
     FINDINGS+=("${file}${FINDING_SEP}${line_number}${FINDING_SEP}${action}${FINDING_SEP}${repo}${FINDING_SEP}${current_version}${FINDING_SEP}${latest_version}${FINDING_SEP}${compatibility_score}${FINDING_SEP}${verified_creator}${FINDING_SEP}${release_notes}")
 }
@@ -673,7 +695,7 @@ render_yaml_report() {
         printf "    latest: %s\n" "$(yaml_quote "$latest_version")"
         printf "    compatibility_score: %s\n" "$(yaml_scalar "$compatibility_score")"
         printf "    verified_creator: %s\n" "$verified_creator"
-        printf "    release_notes: %s\n" "$(yaml_quote "$release_notes")"
+        printf "    release_notes: %s\n" "$(yaml_scalar "$release_notes")"
     done
 }
 
@@ -749,8 +771,8 @@ prompt_for_pr_branch() {
     printf "Create a new branch before applying updates and opening the PR? [Y/n] "
     read -r answer
 
-    case "${answer,,}" in
-        n|no)
+    case "$answer" in
+        n|N|no|No|NO)
             return
             ;;
     esac
@@ -944,22 +966,30 @@ print_compatibility_badge() {
 }
 
 build_pr_update_lines() {
-    local update repo current_version latest_version _file key
-    local -A counts=()
-    local -a order=()
+    local update repo current_version latest_version _file key index found
+    local -a keys=()
+    local -a counts=()
 
     for update in "${UPDATED_ACTIONS[@]}"; do
         IFS='|' read -r repo current_version latest_version _file <<< "$update"
         key="${repo}|${current_version}|${latest_version}"
-        if [[ -z "${counts[$key]+set}" ]]; then
-            order+=("$key")
-            counts[$key]=0
+        found=false
+        for index in "${!keys[@]}"; do
+            if [[ "${keys[$index]}" == "$key" ]]; then
+                counts[index]=$((counts[index] + 1))
+                found=true
+                break
+            fi
+        done
+
+        if ! $found; then
+            keys+=("$key")
+            counts+=(1)
         fi
-        counts[$key]=$((counts[$key] + 1))
     done
 
-    for key in "${order[@]}"; do
-        printf "%s|%s\n" "$key" "${counts[$key]}"
+    for index in "${!keys[@]}"; do
+        printf "%s|%s\n" "${keys[$index]}" "${counts[$index]}"
     done
 }
 
@@ -1165,7 +1195,9 @@ scan_files() {
                         echo "      Line: $(msg "info" "$line_number")"
                         echo "      Current: $(msg "warning" "$current_version")"
                         echo "      Latest: $(msg "success" "$latest_version")"
-                        echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
+                        if release_notes=$(release_notes_url "$repo" "$latest_version"); then
+                            echo "      Release Notes: $(msg "code" "$release_notes")"
+                        fi
                         echo ""
                     fi
                 fi
@@ -1205,7 +1237,9 @@ scan_files() {
                     echo "      Current: $(msg "warning" "$current_version")"
                     echo "      Latest: $(msg "success" "$latest_version")"
                     echo -e "      $badge"
-                    echo "      Release Notes: $(msg "code" "https://github.com/$repo/releases/tag/v$latest_version")"
+                    if release_notes=$(release_notes_url "$repo" "$latest_version"); then
+                        echo "      Release Notes: $(msg "code" "$release_notes")"
+                    fi
                     echo ""
                 fi
 
