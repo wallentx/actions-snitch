@@ -2,6 +2,9 @@
 
 Like dependabot, but in bash for local execution. This tool helps you identify and update outdated GitHub Actions in your workflow files.
 
+<img width="3173" height="1161" alt="1000037896" src="https://github.com/user-attachments/assets/83e27000-7b8a-4f43-93e0-d7e310287225" />
+
+
 ## Features
 
 - 🔍 Scans all workflow files for outdated GitHub Actions
