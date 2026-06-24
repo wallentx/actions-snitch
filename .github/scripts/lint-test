@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $RUNNER_VERBOSE -eq 1 ]]; then
+if [[ "${RUNNER_VERBOSE:-0}" -eq 1 ]]; then
   set -x
 fi
 
@@ -412,7 +412,7 @@ test_update_in_place() {
   write_stubs "$bin_dir" 90
   init_workflow_repo "$repo"
 
-  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u >/dev/null)
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" TERM=dumb "$SCRIPT" -u >/dev/null)
 
   [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
     fail "-u did not update the workflow in-place"
@@ -499,6 +499,26 @@ test_quiet_scan_prints_current_directory() {
     fail "quiet scan output should print the current directory before the final status"
   [[ "$output" == *"☑️ actions/checkout is outdated:"* ]] ||
     fail "quiet scan output should mark verified creators"
+}
+
+test_ci_scan_skips_spinner() {
+  local case_dir="$TMP_ROOT/ci-scan"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local output
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" CI=true "$SCRIPT")
+
+  [[ "$output" == *"Checking $repo"* ]] ||
+    fail "CI scan output did not include the current directory"
+  [[ "$output" == *"Findings in .github/workflows/build.yml:"* ]] ||
+    fail "CI scan output did not include findings"
+  [[ "$output" != *$'\r'* ]] ||
+    fail "CI scan output should not include spinner carriage returns"
 }
 
 test_json_output_groups_findings_by_repo() {
@@ -835,6 +855,7 @@ test_update_branch_creation
 test_force_gate
 test_verified_creator_update_gate
 test_quiet_scan_prints_current_directory
+test_ci_scan_skips_spinner
 test_json_output_groups_findings_by_repo
 test_markdown_output_groups_findings_by_repo
 test_yaml_output_groups_findings_by_repo

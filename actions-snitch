@@ -130,11 +130,17 @@ structured_output() {
     [[ -n "$OUTPUT_FORMAT" ]]
 }
 
+ci_environment() {
+    [[ "${CI:-}" == "true" ]]
+}
+
 # Spinner setup
 SPINNER_TMPFILES=()
 
 spinner_cleanup() {
-  tput cnorm > /dev/null 2> /dev/null
+  if ! ci_environment; then
+    tput cnorm > /dev/null 2> /dev/null || true
+  fi
   local tmpout
   for tmpout in "${SPINNER_TMPFILES[@]}"; do
     rm -f "$tmpout" 2> /dev/null
@@ -200,12 +206,17 @@ spin()
     sleep 0.040
   done
   printf '%b\r' "${esc}[2K"
-  tput cnorm 2> /dev/null
+  tput cnorm 2> /dev/null || true
   wait "$p"
 }
 
 spinner() {
   local tmpout status=0
+
+  if ci_environment; then
+    "$@"
+    return
+  fi
 
   tmpout=$(mktemp "${TMPDIR:-/tmp}/tmpXXXXXXXXXX") || return 1
   SPINNER_TMPFILES+=("$tmpout")
