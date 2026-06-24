@@ -375,6 +375,9 @@ test_option_validation() {
   output=$("$SCRIPT" -h)
   [[ "$output" == *"Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
     fail "help output does not document the expected usage"
+  output=$(TERM=dumb "$SCRIPT" -h)
+  [[ "$output" == *"Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
+    fail "help output should work without color-capable terminal settings"
   [[ "$output" == *"  -o    Output findings as json, md, or yaml"* ]] ||
     fail "help output does not document the output option"
   [[ "$output" == *"  -t    Only update actions from GitHub Marketplace verified creators"* ]] ||
@@ -469,7 +472,7 @@ test_verified_creator_update_gate() {
     fail "-u -f -t should update verified creator actions"
   grep -q 'docker/setup-buildx-action@v1' "$repo/.github/workflows/build.yml" ||
     fail "-u -f -t should leave unverified creator actions unchanged"
-  grep -qv 'docker/setup-buildx-action@v3' "$repo/.github/workflows/build.yml" ||
+  ! grep -q 'docker/setup-buildx-action@v3' "$repo/.github/workflows/build.yml" ||
     fail "-u -f -t should not update unverified creator actions"
 }
 

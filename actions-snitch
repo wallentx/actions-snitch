@@ -2,20 +2,24 @@
 
 set -e
 
+tput_or_empty() {
+    tput "$@" 2>/dev/null || true
+}
+
 # Color setup
 if ! tput colors >/dev/null 2>&1; then
     rd=gr=yl=bl=mg=cy=wh=gy=bd=nc=""
 else
-    rd=$(tput setaf 1)   # Red
-    gr=$(tput setaf 2)   # Green
-    yl=$(tput setaf 3)   # Yellow
-    bl=$(tput setaf 4)   # Blue
-    mg=$(tput setaf 5)   # Magenta
-    cy=$(tput setaf 6)   # Cyan
-    wh=$(tput setaf 7)   # White
-    gy=$(tput setaf 8)   # Gray
-    bd=$(tput bold)      # Bold
-    nc=$(tput sgr0)      # No Color
+    rd=$(tput_or_empty setaf 1)   # Red
+    gr=$(tput_or_empty setaf 2)   # Green
+    yl=$(tput_or_empty setaf 3)   # Yellow
+    bl=$(tput_or_empty setaf 4)   # Blue
+    mg=$(tput_or_empty setaf 5)   # Magenta
+    cy=$(tput_or_empty setaf 6)   # Cyan
+    wh=$(tput_or_empty setaf 7)   # White
+    gy=$(tput_or_empty setaf 8)   # Gray
+    bd=$(tput_or_empty bold)      # Bold
+    nc=$(tput_or_empty sgr0)      # No Color
 fi
 
 # Unified message handling function
