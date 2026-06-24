@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
+
+if [[ "${RUNNER_VERBOSE:-0}" -eq 1 ]]; then
+  set -x
+fi
 
 ROOT=$(git rev-parse --show-toplevel)
 SCRIPT="$ROOT/actions-snitch"
@@ -36,8 +39,40 @@ write_stubs() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "\${1:-}" == "api" && "\${2:-}" == "repos/actions/checkout/releases/latest" ]]; then
-  printf 'v4\\n'
+if [[ "\${1:-}" == "api" ]]; then
+  case "\${2:-}" in
+    repos/actions/checkout/releases/latest)
+      printf 'v4\\n'
+      ;;
+    repos/actions/cache/releases/latest)
+      printf 'v6\\n'
+      ;;
+    repos/github/codeql-action/releases/latest)
+      printf 'codeql-bundle-v2.23.0\\n'
+      ;;
+    repos/actions/checkout)
+      printf 'main\\n'
+      ;;
+    repos/actions/cache)
+      printf 'main\\n'
+      ;;
+    repos/actions/checkout/releases/tags/v4)
+      printf '## What changed\\n- Harden checkout token handling\\n'
+      ;;
+    repos/actions/cache/releases/tags/v6)
+      printf '## What changed\\n- Improve cache lookup behavior\\n'
+      ;;
+    repos/actions/checkout/compare/v2...v4)
+      printf 'abc1234\\tHarden checkout token handling\\thttps://github.com/actions/checkout/commit/abc1234\\n'
+      ;;
+    repos/actions/cache/compare/v5...v6)
+      printf 'cab6789\\tImprove cache lookup behavior\\thttps://github.com/actions/cache/commit/cab6789\\n'
+      ;;
+    *)
+      printf 'unexpected gh api endpoint: %s\\n' "\${2:-}" >&2
+      exit 1
+      ;;
+  esac
 elif [[ "\${1:-}" == "pr" && "\${2:-}" == "create" ]]; then
   printf '%s\\n' "\$*" > "$pr_log"
 else
@@ -50,10 +85,239 @@ GH
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf '%s\\n' '<svg><title>compatibility: $score%</title></svg>'
+case "\$*" in
+  *dependabot-badges.githubapp.com*)
+    printf '%s\\n' '<svg><title>compatibility: $score%</title></svg>'
+    ;;
+  *raw.githubusercontent.com/actions/checkout*/action.y*)
+    printf '%s\\n' 'name: Checkout'
+    ;;
+  *raw.githubusercontent.com/actions/checkout*/CHANGELOG.md*)
+    printf '%s\\n' '## v4' '- Harden checkout token handling'
+    ;;
+  *raw.githubusercontent.com/actions/cache*/action.y*)
+    printf '%s\\n' 'name: Cache'
+    ;;
+  *raw.githubusercontent.com/actions/cache*/CHANGELOG.md*)
+    printf '%s\\n' '## v6' '- Improve cache lookup behavior'
+    ;;
+  *github.com/marketplace/actions/checkout*)
+    printf '%s\\n' 'GitHub has manually verified the creator of the action as an official partner organization.'
+    ;;
+  *github.com/marketplace/actions/cache*)
+    printf '%s\\n' 'GitHub has manually verified the creator of the action as an official partner organization.'
+    ;;
+  *)
+    printf 'unexpected curl args: %s\\n' "\$*" >&2
+    exit 1
+    ;;
+esac
 CURL
 
   chmod +x "$bindir/gh" "$bindir/curl"
+}
+
+write_multi_action_stubs() {
+  local bindir="$1"
+  local pr_log="${2:-}"
+
+  mkdir -p "$bindir"
+
+  cat > "$bindir/gh" <<GH
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "\${1:-}" == "api" ]]; then
+  case "\${2:-}" in
+    repos/actions/checkout/releases/latest)
+      printf 'v4\n'
+      ;;
+    repos/actions/checkout)
+      printf 'main\n'
+      ;;
+    repos/actions/checkout/releases/tags/v4)
+      printf '## What changed\n- Harden checkout token handling\n'
+      ;;
+    repos/actions/checkout/compare/v2...v4)
+      printf 'abc1234\tHarden checkout token handling\thttps://github.com/actions/checkout/commit/abc1234\n'
+      ;;
+    repos/docker/setup-buildx-action/releases/latest)
+      printf 'v3\n'
+      ;;
+    repos/docker/setup-buildx-action)
+      printf 'main\n'
+      ;;
+    repos/docker/setup-buildx-action/releases/tags/v3)
+      printf '## What changed\n- Improve Buildx setup defaults\n'
+      ;;
+    repos/docker/setup-buildx-action/compare/v1...v3)
+      printf 'def5678\tImprove Buildx setup defaults\thttps://github.com/docker/setup-buildx-action/commit/def5678\n'
+      ;;
+    *)
+      printf 'unexpected gh api endpoint: %s\n' "\${2:-}" >&2
+      exit 1
+      ;;
+  esac
+elif [[ "\${1:-}" == "pr" && "\${2:-}" == "create" ]]; then
+  printf '%s\n' "\$*" > "$pr_log"
+else
+  printf 'unexpected gh args: %s\n' "\$*" >&2
+  exit 1
+fi
+GH
+
+  cat > "$bindir/curl" <<'CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$*" in
+  *dependency-name=actions/checkout*)
+    printf '%s\n' '<svg><title>compatibility: 90%</title></svg>'
+    ;;
+  *dependency-name=docker/setup-buildx-action*)
+    printf '%s\n' '<svg><title>compatibility: 50%</title></svg>'
+    ;;
+  *raw.githubusercontent.com/actions/checkout*/action.y*)
+    printf '%s\n' 'name: Checkout'
+    ;;
+  *raw.githubusercontent.com/actions/checkout*/CHANGELOG.md*)
+    printf '%s\n' '## v4' '- Harden checkout token handling'
+    ;;
+  *raw.githubusercontent.com/docker/setup-buildx-action*/action.y*)
+    printf '%s\n' 'name: Docker Setup Buildx'
+    ;;
+  *raw.githubusercontent.com/docker/setup-buildx-action*/CHANGELOG.md*)
+    printf '%s\n' '## v3' '- Improve Buildx setup defaults'
+    ;;
+  *github.com/marketplace/actions/checkout*)
+    printf '%s\n' 'GitHub has manually verified the creator of the action as an official partner organization.'
+    ;;
+  *github.com/marketplace/actions/docker-setup-buildx*)
+    printf '%s\n' 'No verified badge on this page.'
+    ;;
+  *)
+    printf 'unexpected curl args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+CURL
+
+  chmod +x "$bindir/gh" "$bindir/curl"
+}
+
+write_commit_sha_default_branch_stubs() {
+  local bindir="$1"
+  local real_git
+
+  real_git=$(command -v git)
+  mkdir -p "$bindir"
+
+  cat > "$bindir/gh" <<'GH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "api" ]]; then
+  case "${2:-}" in
+    repos/actions/checkout/releases/latest)
+      exit 1
+      ;;
+    repos/actions/checkout)
+      printf 'main\n'
+      ;;
+    repos/actions/checkout/commits/main)
+      printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
+      ;;
+    *)
+      printf 'unexpected gh api endpoint: %s\n' "${2:-}" >&2
+      exit 1
+      ;;
+  esac
+else
+  printf 'unexpected gh args: %s\n' "$*" >&2
+  exit 1
+fi
+GH
+
+  cat > "$bindir/curl" <<'CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$*" in
+  *raw.githubusercontent.com/actions/checkout*/action.y*)
+    printf '%s\n' 'name: Checkout'
+    ;;
+  *github.com/marketplace/actions/checkout*)
+    printf '%s\n' 'GitHub has manually verified the creator of the action as an official partner organization.'
+    ;;
+  *)
+    printf 'unexpected curl args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+CURL
+
+  cat > "$bindir/git" <<GIT
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "\${1:-}" == "clone" && "\${2:-}" == "--depth=1" && "\${3:-}" == "https://github.com/actions/checkout.git" ]]; then
+  mkdir -p "\$4"
+  exit 0
+fi
+
+if [[ "\${1:-}" == "fetch" && "\${2:-}" == "origin" ]]; then
+  exit 0
+fi
+
+if [[ "\${1:-}" == "rev-list" && "\${2:-}" == "--count" ]]; then
+  printf '1\n'
+  exit 0
+fi
+
+exec "$real_git" "\$@"
+GIT
+
+  chmod +x "$bindir/gh" "$bindir/curl" "$bindir/git"
+}
+
+write_null_release_body_stubs() {
+  local bindir="$1"
+  local pr_log="$2"
+
+  write_stubs "$bindir" 90 "$pr_log"
+
+  cat > "$bindir/gh" <<GH
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "\${1:-}" == "api" ]]; then
+  case "\${2:-}" in
+    repos/actions/checkout/releases/latest)
+      printf 'v4\\n'
+      ;;
+    repos/actions/checkout)
+      printf 'main\\n'
+      ;;
+    repos/actions/checkout/releases/tags/v4)
+      printf 'null\\n'
+      ;;
+    repos/actions/checkout/compare/v2...v4)
+      printf 'abc1234\\tHarden checkout token handling\\thttps://github.com/actions/checkout/commit/abc1234\\n'
+      ;;
+    *)
+      printf 'unexpected gh api endpoint: %s\\n' "\${2:-}" >&2
+      exit 1
+      ;;
+  esac
+elif [[ "\${1:-}" == "pr" && "\${2:-}" == "create" ]]; then
+  printf '%s\\n' "\$*" > "$pr_log"
+else
+  printf 'unexpected gh args: %s\\n' "\$*" >&2
+  exit 1
+fi
+GH
+
+  chmod +x "$bindir/gh"
 }
 
 init_workflow_repo() {
@@ -77,9 +341,170 @@ YAML
   git -C "$repo" commit -q -m init
 }
 
+init_multi_finding_repo() {
+  local repo="$1"
+
+  mkdir -p "$repo/.github/workflows"
+  cat > "$repo/.github/workflows/build.yml" <<'YAML'
+name: test
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: docker/setup-buildx-action@v1
+YAML
+
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  git -C "$repo" add .github/workflows/build.yml
+  git -C "$repo" commit -q -m init
+  git -C "$repo" remote add origin https://github.com/wallentx/actions-snitch-fixture.git
+}
+
+init_up_to_date_repo() {
+  local repo="$1"
+
+  mkdir -p "$repo/.github/workflows"
+  cat > "$repo/.github/workflows/build.yml" <<'YAML'
+name: test
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+YAML
+
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  git -C "$repo" add .github/workflows/build.yml
+  git -C "$repo" commit -q -m init
+}
+
+init_non_semver_release_repo() {
+  local repo="$1"
+
+  mkdir -p "$repo/.github/workflows"
+  cat > "$repo/.github/workflows/build.yml" <<'YAML'
+name: test
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: github/codeql-action/init@v4
+YAML
+
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  git -C "$repo" add .github/workflows/build.yml
+  git -C "$repo" commit -q -m init
+}
+
+init_two_updates_before_non_semver_release_repo() {
+  local repo="$1"
+
+  mkdir -p "$repo/.github/workflows"
+  cat > "$repo/.github/workflows/actionlint.yml" <<'YAML'
+name: actionlint
+on: workflow_dispatch
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+YAML
+  cat > "$repo/.github/workflows/codeql.yml" <<'YAML'
+name: codeql
+on: workflow_dispatch
+jobs:
+  codeql:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: github/codeql-action/init@v4
+YAML
+
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  git -C "$repo" add .github/workflows/actionlint.yml .github/workflows/codeql.yml
+  git -C "$repo" commit -q -m init
+}
+
+init_duplicate_pr_body_update_repo() {
+  local repo="$1"
+
+  mkdir -p "$repo/.github/workflows"
+  cat > "$repo/.github/workflows/ci.yml" <<'YAML'
+name: ci
+on: workflow_dispatch
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/cache@v5
+YAML
+  cat > "$repo/.github/workflows/release.yml" <<'YAML'
+name: release
+on: workflow_dispatch
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/cache@v5
+YAML
+
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  git -C "$repo" add .github/workflows/ci.yml .github/workflows/release.yml
+  git -C "$repo" commit -q -m init
+}
+
+init_commit_sha_repo() {
+  local repo="$1"
+
+  mkdir -p "$repo/.github/workflows"
+  cat > "$repo/.github/workflows/build.yml" <<'YAML'
+name: test
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+YAML
+
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  git -C "$repo" add .github/workflows/build.yml
+  git -C "$repo" commit -q -m init
+}
+
 workflow_ref() {
   local repo="$1"
   grep 'uses:' "$repo/.github/workflows/build.yml"
+}
+
+assert_structured_output_clean() {
+  local output="$1"
+
+  [[ "$output" != *"Checking "* ]] ||
+    fail "structured output should not include quiet scan context"
+  [[ "$output" != *"Finished."* ]] ||
+    fail "structured output should not include the final status"
+  [[ "$output" != *"Findings in "* ]] ||
+    fail "structured output should not include regular findings text"
 }
 
 test_option_validation() {
@@ -87,8 +512,15 @@ test_option_validation() {
   local option_output="$TMP_ROOT/option-validation.out"
 
   output=$("$SCRIPT" -h)
-  [[ "$output" == *"Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-v] [-h]"* ]] ||
+  [[ "$output" == *"Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
     fail "help output does not document the expected usage"
+  output=$(TERM=dumb "$SCRIPT" -h)
+  [[ "$output" == *"Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
+    fail "help output should work without color-capable terminal settings"
+  [[ "$output" == *"  -o    Output findings as json, md, or yaml"* ]] ||
+    fail "help output does not document the output option"
+  [[ "$output" == *"  -t    Only update actions from GitHub Marketplace verified creators"* ]] ||
+    fail "help output does not document the verified-creator update option"
 
   if "$SCRIPT" -b sample >"$option_output" 2>&1; then
     fail "-b without -u or -p unexpectedly succeeded"
@@ -97,6 +529,14 @@ test_option_validation() {
   output=$(cat "$option_output")
   [[ "$output" == *"Error: -b can only be used with -u or -p"* ]] ||
     fail "-b without -u or -p did not print the expected error"
+
+  if "$SCRIPT" -t >"$option_output" 2>&1; then
+    fail "-t without -u or -p unexpectedly succeeded"
+  fi
+
+  output=$(cat "$option_output")
+  [[ "$output" == *"Error: -t can only be used with -u or -p"* ]] ||
+    fail "-t without -u or -p did not print the expected error"
 }
 
 test_update_in_place() {
@@ -108,7 +548,7 @@ test_update_in_place() {
   write_stubs "$bin_dir" 90
   init_workflow_repo "$repo"
 
-  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u >/dev/null)
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" TERM=dumb "$SCRIPT" -u >/dev/null)
 
   [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
     fail "-u did not update the workflow in-place"
@@ -156,6 +596,208 @@ test_force_gate() {
     fail "-u -f should apply low compatibility updates"
 }
 
+test_verified_creator_update_gate() {
+  local case_dir="$TMP_ROOT/verified-creator-update"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+
+  mkdir -p "$repo"
+  write_multi_action_stubs "$bin_dir"
+  init_multi_finding_repo "$repo"
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u -f -t >/dev/null)
+
+  grep -q 'actions/checkout@v4' "$repo/.github/workflows/build.yml" ||
+    fail "-u -f -t should update verified creator actions"
+  grep -q 'docker/setup-buildx-action@v1' "$repo/.github/workflows/build.yml" ||
+    fail "-u -f -t should leave unverified creator actions unchanged"
+  ! grep -q 'docker/setup-buildx-action@v3' "$repo/.github/workflows/build.yml" ||
+    fail "-u -f -t should not update unverified creator actions"
+}
+
+test_quiet_scan_prints_current_directory() {
+  local case_dir="$TMP_ROOT/quiet-scan"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local output
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT")
+
+  [[ "$output" == *"Checking $repo"* ]] ||
+    fail "quiet scan output did not include the current directory"
+  [[ "$output" == *"Finished."* ]] ||
+    fail "quiet scan output did not include the final status"
+  [[ "$output" == *"Checking $repo"*"Finished."* ]] ||
+    fail "quiet scan output should print the current directory before the final status"
+  [[ "$output" == *"☑️ actions/checkout is outdated:"* ]] ||
+    fail "quiet scan output should mark verified creators"
+}
+
+test_ci_scan_skips_spinner() {
+  local case_dir="$TMP_ROOT/ci-scan"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local output
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" CI=true "$SCRIPT")
+
+  [[ "$output" == *"Checking $repo"* ]] ||
+    fail "CI scan output did not include the current directory"
+  [[ "$output" == *"Findings in .github/workflows/build.yml:"* ]] ||
+    fail "CI scan output did not include findings"
+  [[ "$output" != *$'\r'* ]] ||
+    fail "CI scan output should not include spinner carriage returns"
+}
+
+test_json_output_groups_findings_by_repo() {
+  local case_dir="$TMP_ROOT/json-output"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/actions-snitch-fixture"
+  local repo_name output
+
+  mkdir -p "$repo"
+  write_multi_action_stubs "$bin_dir"
+  init_multi_finding_repo "$repo"
+  repo_name=$(basename "$repo")
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
+
+  assert_structured_output_clean "$output"
+  [[ "$(jq --arg repo "$repo_name" 'keys == [$repo]' <<< "$output")" == "true" ]] ||
+    fail "json output should contain only the scanned repo key"
+  [[ "$(jq --arg repo "$repo_name" '.[$repo] | length' <<< "$output")" == "2" ]] ||
+    fail "json output should include both findings"
+  jq -e --arg repo "$repo_name" \
+    '.[$repo][] | select(.file == ".github/workflows/build.yml" and .line == 7 and .action == "actions/checkout@v2" and .repository == "actions/checkout" and .current == "2" and .latest == "4" and .compatibility_score == 90 and .verified_creator == true and .release_notes == "https://github.com/actions/checkout/releases/tag/v4")' \
+    <<< "$output" >/dev/null ||
+    fail "json output did not include the checkout finding"
+  jq -e --arg repo "$repo_name" \
+    '.[$repo][] | select(.file == ".github/workflows/build.yml" and .line == 8 and .action == "docker/setup-buildx-action@v1" and .repository == "docker/setup-buildx-action" and .current == "1" and .latest == "3" and .compatibility_score == 50 and .verified_creator == false and .release_notes == "https://github.com/docker/setup-buildx-action/releases/tag/v3")' \
+    <<< "$output" >/dev/null ||
+    fail "json output did not include the buildx finding"
+}
+
+test_markdown_output_groups_findings_by_repo() {
+  local case_dir="$TMP_ROOT/markdown-output"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/actions-snitch-fixture"
+  local repo_name repo_url output
+
+  mkdir -p "$repo"
+  write_multi_action_stubs "$bin_dir"
+  init_multi_finding_repo "$repo"
+  repo_name=$(basename "$repo")
+  repo_url="https://github.com/wallentx/actions-snitch-fixture"
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o md)
+
+  assert_structured_output_clean "$output"
+  [[ "$output" == "## [$repo_name]($repo_url)"* ]] ||
+    fail "markdown output should start with the linked scanned repo heading"
+  [[ "$output" == *"| .github/workflows/build.yml | 7 | ☑️ actions/checkout@v2 | 2 | 4 | 90% | https://github.com/actions/checkout/releases/tag/v4 |"* ]] ||
+    fail "markdown output did not include the checkout finding"
+  [[ "$output" == *"| .github/workflows/build.yml | 8 | docker/setup-buildx-action@v1 | 1 | 3 | 50% | https://github.com/docker/setup-buildx-action/releases/tag/v3 |"* ]] ||
+    fail "markdown output did not include the buildx finding"
+}
+
+test_yaml_output_groups_findings_by_repo() {
+  local case_dir="$TMP_ROOT/yaml-output"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/actions-snitch-fixture"
+  local repo_name output
+
+  mkdir -p "$repo"
+  write_multi_action_stubs "$bin_dir"
+  init_multi_finding_repo "$repo"
+  repo_name=$(basename "$repo")
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o yaml)
+
+  assert_structured_output_clean "$output"
+  [[ "$(yq -r ".\"$repo_name\" | length" <<< "$output")" == "2" ]] ||
+    fail "yaml output should include both findings"
+  [[ "$(yq -r ".\"$repo_name\"[0].file" <<< "$output")" == ".github/workflows/build.yml" ]] ||
+    fail "yaml output did not include the checkout file"
+  [[ "$(yq -r ".\"$repo_name\"[0].compatibility_score" <<< "$output")" == "90" ]] ||
+    fail "yaml output did not include the checkout compatibility score"
+  [[ "$(yq -r ".\"$repo_name\"[0].verified_creator" <<< "$output")" == "true" ]] ||
+    fail "yaml output did not mark the verified creator"
+  [[ "$(yq -r ".\"$repo_name\"[1].action" <<< "$output")" == "docker/setup-buildx-action@v1" ]] ||
+    fail "yaml output did not include the buildx action"
+  [[ "$(yq -r ".\"$repo_name\"[1].verified_creator" <<< "$output")" == "false" ]] ||
+    fail "yaml output should mark unverified creators as false"
+}
+
+test_structured_output_omits_repo_when_no_findings() {
+  local case_dir="$TMP_ROOT/no-findings-output"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/actions-snitch-clean"
+  local json_output md_output yaml_output
+
+  mkdir -p "$repo"
+  write_multi_action_stubs "$bin_dir"
+  init_up_to_date_repo "$repo"
+
+  json_output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/json-cache" "$SCRIPT" -o json)
+  [[ -z "$json_output" ]] ||
+    fail "json output should be empty when there are no findings"
+
+  md_output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/md-cache" "$SCRIPT" -o md)
+  [[ -z "$md_output" ]] ||
+    fail "markdown output should be empty when there are no findings"
+
+  yaml_output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/yaml-cache" "$SCRIPT" -o yaml)
+  [[ -z "$yaml_output" ]] ||
+    fail "yaml output should be empty when there are no findings"
+}
+
+test_commit_sha_default_branch_finding_has_no_release_notes_url() {
+  local case_dir="$TMP_ROOT/commit-sha-default-branch"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/actions-snitch-fixture"
+  local repo_name output
+
+  mkdir -p "$repo"
+  write_commit_sha_default_branch_stubs "$bin_dir"
+  init_commit_sha_repo "$repo"
+  repo_name=$(basename "$repo")
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
+
+  [[ "$(jq -r --arg repo "$repo_name" '.[$repo][0].latest' <<< "$output")" == "main" ]] ||
+    fail "commit SHA finding should report the default branch as latest"
+  [[ "$(jq -r --arg repo "$repo_name" '.[$repo][0].release_notes' <<< "$output")" == "null" ]] ||
+    fail "commit SHA default-branch finding should not emit a release-notes URL"
+  [[ "$output" != *"/releases/tag/vmain"* ]] ||
+    fail "commit SHA default-branch finding should not emit a vmain release URL"
+}
+
+test_output_format_validation() {
+  local case_dir="$TMP_ROOT/output-format-validation"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local output_file="$case_dir/output.out"
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+
+  if (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o xml >"$output_file" 2>&1); then
+    fail "-o xml unexpectedly succeeded"
+  fi
+
+  [[ "$(cat "$output_file")" == *"Error: -o must be one of: json, md, yaml"* ]] ||
+    fail "-o xml did not print the expected validation error"
+}
+
 test_pr_flow() {
   local case_dir="$TMP_ROOT/pr-flow"
   local bin_dir="$case_dir/bin"
@@ -184,6 +826,242 @@ test_pr_flow() {
     fail "-p -b did not push the target branch"
   [[ "$(cat "$pr_log")" == *"--head actions-update --base main"* ]] ||
     fail "-p -b did not create a PR for the target branch"
+  [[ "$(cat "$pr_log")" == *"Bumps the github-actions group with 1 update: [actions/checkout](https://github.com/actions/checkout)."* ]] ||
+    fail "PR body should include the Dependabot-inspired summary"
+  [[ "$(cat "$pr_log")" == *"Updates \`actions/checkout\` from 2 to 4"* ]] ||
+    fail "PR body should include the action version update"
+  [[ "$(cat "$pr_log")" == *"<summary>Release notes</summary>"* ]] ||
+    fail "PR body should include collapsible release notes"
+  [[ "$(cat "$pr_log")" == *"Sourced from [actions/checkout's releases](https://github.com/actions/checkout/releases)."* ]] ||
+    fail "PR body should link to release notes source"
+  [[ "$(cat "$pr_log")" == *"Harden checkout token handling"* ]] ||
+    fail "PR body should include release or changelog content"
+  [[ "$(cat "$pr_log")" == *"<summary>Changelog</summary>"* ]] ||
+    fail "PR body should include a collapsible changelog"
+  [[ "$(cat "$pr_log")" == *"Sourced from [actions/checkout's changelog](https://github.com/actions/checkout/blob/main/CHANGELOG.md)."* ]] ||
+    fail "PR body should link to changelog source"
+  [[ "$(cat "$pr_log")" == *"<summary>Commits</summary>"* ]] ||
+    fail "PR body should include collapsible commits"
+  [[ "$(cat "$pr_log")" == *"https://github.com/actions/checkout/commit/abc1234"* && "$(cat "$pr_log")" == *"Harden checkout token handling"* ]] ||
+    fail "PR body should include compare commits"
+  [[ "$(cat "$pr_log")" == *"https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=actions/checkout&package-manager=github_actions&previous-version=2&new-version=4"* ]] ||
+    fail "PR body should include the Dependabot compatibility badge"
+  [[ "$(cat "$pr_log")" == *"<sub>Findings and PR created by [actions-snitch](https://github.com/wallentx/actions-snitch).</sub>"* ]] ||
+    fail "PR body should include the actions-snitch footer"
+}
+
+test_pr_body_multiple_updates() {
+  local case_dir="$TMP_ROOT/pr-body-multiple"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local origin="$case_dir/origin.git"
+  local pr_log="$case_dir/pr.log"
+  local body
+
+  mkdir -p "$repo"
+  write_multi_action_stubs "$bin_dir" "$pr_log"
+  init_multi_finding_repo "$repo"
+  git init --bare -q "$origin"
+  git -C "$repo" remote set-url origin "$origin"
+  git -C "$repo" push -q -u origin main
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -f -b actions-update >/dev/null)
+
+  body=$(cat "$pr_log")
+  [[ "$body" == *"Bumps the github-actions group with 2 updates: [actions/checkout](https://github.com/actions/checkout), [docker/setup-buildx-action](https://github.com/docker/setup-buildx-action)."* ]] ||
+    fail "multi-action PR body should list both updates in the summary"
+  [[ "$body" == *"## [actions/checkout](https://github.com/actions/checkout)"* ]] ||
+    fail "multi-action PR body should include a checkout section"
+  [[ "$body" == *"## [docker/setup-buildx-action](https://github.com/docker/setup-buildx-action)"* ]] ||
+    fail "multi-action PR body should include a buildx section"
+  [[ "$body" == *"Updates \`actions/checkout\` from 2 to 4"* ]] ||
+    fail "multi-action PR body should describe the checkout update"
+  [[ "$body" == *"Updates \`docker/setup-buildx-action\` from 1 to 3"* ]] ||
+    fail "multi-action PR body should describe the buildx update"
+  [[ "$body" == *"Sourced from [docker/setup-buildx-action's releases](https://github.com/docker/setup-buildx-action/releases)."* ]] ||
+    fail "multi-action PR body should link buildx release notes"
+  [[ "$body" == *"Sourced from [docker/setup-buildx-action's changelog](https://github.com/docker/setup-buildx-action/blob/main/CHANGELOG.md)."* ]] ||
+    fail "multi-action PR body should link buildx changelog"
+  [[ "$body" == *"https://github.com/docker/setup-buildx-action/commit/def5678"* && "$body" == *"Improve Buildx setup defaults"* ]] ||
+    fail "multi-action PR body should include buildx compare commits"
+  [[ "$body" == *"dependency-name=actions/checkout&package-manager=github_actions&previous-version=2&new-version=4"* ]] ||
+    fail "multi-action PR body should include the checkout compatibility badge"
+  [[ "$body" == *"dependency-name=docker/setup-buildx-action&package-manager=github_actions&previous-version=1&new-version=3"* ]] ||
+    fail "multi-action PR body should include the buildx compatibility badge"
+  [[ "$body" == *"<sub>Findings and PR created by [actions-snitch](https://github.com/wallentx/actions-snitch).</sub>"* ]] ||
+    fail "multi-action PR body should include the actions-snitch footer"
+}
+
+test_pr_flow_continues_after_non_semver_latest_release() {
+  local case_dir="$TMP_ROOT/non-semver-latest-pr-flow"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local origin="$case_dir/origin.git"
+  local pr_log="$case_dir/pr.log"
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90 "$pr_log"
+  init_non_semver_release_repo "$repo"
+  git init --bare -q "$origin"
+  git -C "$repo" remote add origin "$origin"
+  git -C "$repo" push -q -u origin main
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -b actions-update >/dev/null)
+
+  [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+    fail "-p should update the numeric action before a non-semver latest release"
+  [[ "$(workflow_ref "$repo")" == *"github/codeql-action/init@v4"* ]] ||
+    fail "-p should leave the non-semver latest release action unchanged"
+  [[ "$(git -C "$repo" rev-list --count HEAD)" == "2" ]] ||
+    fail "-p should commit updates even after skipping a non-semver latest release"
+  [[ -z "$(git -C "$repo" status --short)" ]] ||
+    fail "-p should leave the worktree clean after skipping a non-semver latest release"
+  git --git-dir="$origin" show-ref --verify --quiet refs/heads/actions-update ||
+    fail "-p should push the target branch after skipping a non-semver latest release"
+  [[ "$(cat "$pr_log")" == *"Bumps the github-actions group with 1 update: [actions/checkout](https://github.com/actions/checkout)."* ]] ||
+    fail "-p should create a PR body for committed updates after skipping a non-semver latest release"
+}
+
+test_pr_flow_commits_two_updates_before_non_semver_latest_release() {
+  local case_dir="$TMP_ROOT/two-updates-before-non-semver-latest-pr-flow"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local origin="$case_dir/origin.git"
+  local pr_log="$case_dir/pr.log"
+  local body
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90 "$pr_log"
+  init_two_updates_before_non_semver_release_repo "$repo"
+  git init --bare -q "$origin"
+  git -C "$repo" remote add origin "$origin"
+  git -C "$repo" push -q -u origin main
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -b actions-update >/dev/null)
+
+  grep -q 'actions/checkout@v4' "$repo/.github/workflows/actionlint.yml" ||
+    fail "-p should update checkout in actionlint before a later non-semver latest release"
+  grep -q 'actions/checkout@v4' "$repo/.github/workflows/codeql.yml" ||
+    fail "-p should update checkout in codeql before a later non-semver latest release"
+  grep -q 'github/codeql-action/init@v4' "$repo/.github/workflows/codeql.yml" ||
+    fail "-p should leave the non-semver latest release action unchanged"
+  [[ "$(git -C "$repo" rev-list --count HEAD)" == "2" ]] ||
+    fail "-p should commit two checkout updates after skipping a later non-semver latest release"
+  [[ -z "$(git -C "$repo" status --short)" ]] ||
+    fail "-p should leave the worktree clean after committing two checkout updates"
+  git --git-dir="$origin" show-ref --verify --quiet refs/heads/actions-update ||
+    fail "-p should push two checkout updates after skipping a later non-semver latest release"
+
+  body=$(cat "$pr_log")
+  [[ "$body" == *"Bumps the github-actions group with 1 update: [actions/checkout](https://github.com/actions/checkout)."* ]] ||
+    fail "-p should create a deduped PR body for the two checkout updates"
+  [[ "$body" == *"Updates \`actions/checkout\` from 2 to 4 across 2 workflow entries."* ]] ||
+    fail "-p should describe the two checkout references without duplicating release details"
+  [[ "$body" != *"github/codeql-action/init"* ]] ||
+    fail "-p should not include the skipped non-semver latest release action in the PR body"
+}
+
+test_pr_body_ignores_null_release_notes_body() {
+  local case_dir="$TMP_ROOT/null-release-notes-pr-body"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local origin="$case_dir/origin.git"
+  local pr_log="$case_dir/pr.log"
+  local body
+
+  mkdir -p "$repo"
+  write_null_release_body_stubs "$bin_dir" "$pr_log"
+  init_workflow_repo "$repo"
+  git init --bare -q "$origin"
+  git -C "$repo" remote add origin "$origin"
+  git -C "$repo" push -q -u origin main
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -b actions-update >/dev/null)
+
+  body=$(cat "$pr_log")
+  [[ "$body" != *$'\n> null'* ]] ||
+    fail "PR body should not include a literal null release-notes body"
+  [[ "$body" == *"No release notes were found in [actions/checkout's releases](https://github.com/actions/checkout/releases)."* ]] ||
+    fail "PR body should fall back when release notes body is null"
+}
+
+test_pr_body_ignores_cached_null_release_notes_body() {
+  local case_dir="$TMP_ROOT/cached-null-release-notes-pr-body"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local origin="$case_dir/origin.git"
+  local pr_log="$case_dir/pr.log"
+  local cache_dir="$case_dir/cache/actions-snitch"
+  local cache_key body
+
+  mkdir -p "$repo" "$cache_dir"
+  write_stubs "$bin_dir" 90 "$pr_log"
+  init_workflow_repo "$repo"
+  git init --bare -q "$origin"
+  git -C "$repo" remote add origin "$origin"
+  git -C "$repo" push -q -u origin main
+
+  cache_key=$(printf '%s\n' 'gh_api:repos/actions/checkout/releases/tags/v4:.body' | md5sum | cut -d' ' -f1)
+  printf 'null\n' > "$cache_dir/$cache_key"
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -b actions-update >/dev/null)
+
+  body=$(cat "$pr_log")
+  [[ "$body" != *$'\n> null'* ]] ||
+    fail "PR body should not include a cached null release-notes body"
+  [[ "$body" == *"Sourced from [actions/checkout's releases](https://github.com/actions/checkout/releases)."* ]] ||
+    fail "PR body should refetch release notes when cached release notes are null"
+}
+
+test_script_avoids_bash4_only_syntax() {
+  ! grep -q 'local -A' "$SCRIPT" ||
+    fail "actions-snitch should not use Bash 4 associative arrays"
+  # shellcheck disable=SC2016
+  ! grep -q '\${[^}]*,,[^}]*}' "$SCRIPT" ||
+    fail "actions-snitch should not use Bash 4 case-modification expansion"
+}
+
+test_pr_body_dedupes_repeated_action_updates() {
+  local case_dir="$TMP_ROOT/pr-body-dedupes-repeated-updates"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local origin="$case_dir/origin.git"
+  local pr_log="$case_dir/pr.log"
+  local body checkout_sections cache_sections
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90 "$pr_log"
+  init_duplicate_pr_body_update_repo "$repo"
+  git init --bare -q "$origin"
+  git -C "$repo" remote add origin "$origin"
+  git -C "$repo" push -q -u origin main
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -b actions-update >/dev/null)
+
+  grep -q 'actions/checkout@v4' "$repo/.github/workflows/ci.yml" ||
+    fail "-p should update checkout in ci"
+  grep -q 'actions/checkout@v4' "$repo/.github/workflows/release.yml" ||
+    fail "-p should update checkout in release"
+  grep -q 'actions/cache@v6' "$repo/.github/workflows/ci.yml" ||
+    fail "-p should update cache in ci"
+  grep -q 'actions/cache@v6' "$repo/.github/workflows/release.yml" ||
+    fail "-p should update cache in release"
+
+  body=$(cat "$pr_log")
+  [[ "$body" == *"Bumps the github-actions group with 2 updates: [actions/checkout](https://github.com/actions/checkout), [actions/cache](https://github.com/actions/cache)."* ]] ||
+    fail "PR body should summarize unique action updates"
+  [[ "$body" == *"Updates \`actions/checkout\` from 2 to 4 across 2 workflow entries."* ]] ||
+    fail "PR body should describe repeated checkout updates once"
+  [[ "$body" == *"Updates \`actions/cache\` from 5 to 6 across 2 workflow entries."* ]] ||
+    fail "PR body should describe repeated cache updates once"
+  checkout_sections=$(grep -o '## \[actions/checkout\]' <<< "$body" | wc -l | tr -d ' ')
+  cache_sections=$(grep -o '## \[actions/cache\]' <<< "$body" | wc -l | tr -d ' ')
+  [[ "$checkout_sections" == "1" ]] ||
+    fail "PR body should include one checkout section"
+  [[ "$cache_sections" == "1" ]] ||
+    fail "PR body should include one cache section"
+  [[ "$body" != *".github/workflows/"* ]] ||
+    fail "PR body should not list individual workflow file paths"
 }
 
 run_shellcheck
@@ -192,6 +1070,22 @@ test_option_validation
 test_update_in_place
 test_update_branch_creation
 test_force_gate
+test_verified_creator_update_gate
+test_quiet_scan_prints_current_directory
+test_ci_scan_skips_spinner
+test_json_output_groups_findings_by_repo
+test_markdown_output_groups_findings_by_repo
+test_yaml_output_groups_findings_by_repo
+test_structured_output_omits_repo_when_no_findings
+test_commit_sha_default_branch_finding_has_no_release_notes_url
+test_output_format_validation
 test_pr_flow
+test_pr_body_multiple_updates
+test_pr_flow_continues_after_non_semver_latest_release
+test_pr_flow_commits_two_updates_before_non_semver_latest_release
+test_pr_body_ignores_null_release_notes_body
+test_pr_body_ignores_cached_null_release_notes_body
+test_script_avoids_bash4_only_syntax
+test_pr_body_dedupes_repeated_action_updates
 
 printf 'lint-test passed\n'

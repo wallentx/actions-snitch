@@ -12,6 +12,7 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 - 🚀 Shows compatibility scores between versions
 - 💾 Caches API responses for faster subsequent runs (24h TTL)
 - 🔄 Can automatically create PRs to update actions
+- ☑️ Indicates GitHub Marketplace verified creators
 - 🎨 Cute color-coded output with status badges
 - 🏃 Fast local execution
 - 🔒 Handles private/internal actions gracefully
@@ -32,7 +33,7 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 ## Usage
 
 ```bash
-actions-snitch [-u] [-f] [-p] [-b branch] [-v] [-h]
+actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]
 ```
 
 ### Options
@@ -41,6 +42,8 @@ actions-snitch [-u] [-f] [-p] [-b branch] [-v] [-h]
 - `-f` Force updates regardless of compatibility score (requires -u or -p)
 - `-p` Commit, push, and create a pull request after updating actions (implies -u)
 - `-b` Branch to update or create before applying changes (requires -u or -p)
+- `-o` Output findings as `json`, `md`, or `yaml`
+- `-t` Only update actions from GitHub Marketplace verified creators (requires -u or -p)
 - `-v` Verbose output - show skipped actions and debug info
 - `-h` Display help message
 
@@ -55,6 +58,20 @@ Findings in .github/workflows/build.yml:
       🤖compatibility: 79%
       Release Notes: https://github.com/actions/checkout/releases/tag/v4
 ```
+
+### Structured Output
+
+Use `-o json`, `-o md`, or `-o yaml` to print only findings in a machine-readable or report-friendly format. Structured output is grouped under the name of the scanned repository and prints nothing when there are no findings.
+
+Actions from GitHub Marketplace verified creators are marked with `☑️` in human and Markdown output. JSON and YAML output keep the action name unchanged and include a `verified_creator` boolean.
+
+Use `-t` with `-u` or `-p` to update only actions from verified creators. This gate is stricter than `-f`; forced updates still skip unverified creators when `-t` is set.
+
+Markdown output links the repository heading to the `origin` remote when one is configured.
+
+### Pull Request Body
+
+PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count.
 
 ## How It Works
 
