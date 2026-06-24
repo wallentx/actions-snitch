@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
+
+if [[ RUNNER_VERBOSE -eq 1 ]]; then
+  set -x
+fi
 
 ROOT=$(git rev-parse --show-toplevel)
 SCRIPT="$ROOT/actions-snitch"
