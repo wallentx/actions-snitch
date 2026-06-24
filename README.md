@@ -29,14 +29,15 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 ## Usage
 
 ```bash
-actions-snitch [-u] [-f] [-p] [-v] [-h]
+actions-snitch [-u] [-f] [-p] [-b branch] [-v] [-h]
 ```
 
 ### Options
 
-- `-u` Update outdated actions by creating a new branch and committing changes
-- `-f` Force update outdated actions regardless of compatibility score (requires -u)
-- `-p` Push changes and create a pull request (requires -u)
+- `-u` Update outdated actions in-place
+- `-f` Force updates regardless of compatibility score (requires -u or -p)
+- `-p` Commit, push, and create a pull request after updating actions (implies -u)
+- `-b` Branch to update or create before applying changes (requires -u or -p)
 - `-v` Verbose output - show skipped actions and debug info
 - `-h` Display help message
 
@@ -60,8 +61,9 @@ Findings in .github/workflows/build.yml:
    - Checks the current version against the latest release
    - Fetches compatibility score from dependabot
    - Shows detailed information for outdated actions
-3. Optionally creates PRs to update outdated actions
-4. Skips internal/private actions and docker references
+3. Optionally updates workflow files in-place
+4. Optionally commits the updates, pushes them, and creates a PR
+5. Skips internal/private actions and docker references
 
 ## Cache
 
@@ -74,4 +76,4 @@ Cache entries expire after 24 hours.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request. 
+Contributions are welcome! Please feel free to submit a Pull Request.
