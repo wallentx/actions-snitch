@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ RUNNER_VERBOSE -eq 1 ]]; then
+if [[ $RUNNER_VERBOSE -eq 1 ]]; then
   set -x
 fi
 
