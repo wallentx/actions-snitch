@@ -83,7 +83,7 @@ while getopts ":ufpb:o:thv" opt; do
     b) TARGET_BRANCH="$OPTARG" ;;
     o) OUTPUT_FORMAT="$OPTARG" ;;
     t) VERIFIED_CREATORS_ONLY=true ;;
-    v) ((VERBOSITY++)) ;;
+    v) VERBOSITY=$((VERBOSITY + 1)) ;;
     h) usage ;;
     \?) msg "error" "Invalid option -$OPTARG" >&2; usage ;;
     :) msg "error" "Option -$OPTARG requires an argument" >&2; usage ;;
@@ -1052,23 +1052,19 @@ commit_push_pr() {
 
     if (( UPDATE_COUNT == 0 )); then
         if ! structured_output; then
-            msg "status" "No workflow updates were made; skipping commit, push, and PR creation."
+            msg "status" "No action updates were made; skipping commit, push, and PR creation."
         fi
         return
     fi
 
-    if git diff --quiet -- .github/workflows; then
-        if ! structured_output; then
-            msg "status" "No workflow file changes detected; skipping commit, push, and PR creation."
-        fi
-        return
-    fi
-
-    git add .github/workflows
+    for update in "${UPDATED_ACTIONS[@]}"; do
+        IFS='|' read -r repo current_version latest_version file <<< "$update"
+        git add -- "$file"
+    done
 
     if git diff --cached --quiet; then
         if ! structured_output; then
-            msg "status" "No staged workflow changes detected; skipping commit, push, and PR creation."
+            msg "status" "No staged action updates detected; skipping commit, push, and PR creation."
         fi
         return
     fi
@@ -1103,6 +1099,18 @@ commit_push_pr() {
 }
 
 # Main scanning logic
+find_action_files() {
+    {
+        if [[ -d .github/workflows ]]; then
+            find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \)
+        fi
+
+        find . \
+            \( -type d \( -name '.git' -o -name 'node_modules' \) -prune \) -o \
+            \( -type f \( -name 'action.yml' -o -name 'action.yaml' \) -print \)
+    } | sed 's|^\./||' | sort -u
+}
+
 scan_files() {
     while IFS= read -r file; do
         file_header_printed=false
@@ -1111,7 +1119,7 @@ scan_files() {
         ! structured_output && $VERBOSE && msg "info" "Checking file: $file"
 
         # First check if the file has any actions
-        if ! yq -e '.jobs.*.steps[].uses' "$file" >/dev/null 2>&1; then
+        if ! yq -e '.. | select(tag == "!!map" and has("uses")) | .uses' "$file" >/dev/null 2>&1; then
             ! structured_output && $VERBOSE && msg "status" "  No actions found in $file"
             continue
         fi
@@ -1148,8 +1156,10 @@ scan_files() {
             # Use cached API calls
             if latest_tag=$(cached_gh_api "repos/${repo}/releases/latest" '.tag_name'); then
                  latest_version="${latest_tag#v}"
+                 latest_ref="$latest_tag"
             elif default_branch=$(cached_gh_api "repos/${repo}" '.default_branch'); then
                  latest_version="$default_branch"
+                 latest_ref="$default_branch"
             else
                  ! structured_output && $VERBOSE && msg "warning" "  Unable to determine latest version for $repo" >&2
                  continue
@@ -1157,7 +1167,7 @@ scan_files() {
 
             # Handle commit SHAs
             if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then
-                if ! latest_sha=$(cached_gh_api "repos/${repo}/commits/${latest_version}" '.sha'); then
+                if ! latest_sha=$(cached_gh_api "repos/${repo}/commits/${latest_ref}" '.sha'); then
                      ! structured_output && $VERBOSE && msg "warning" "  Unable to determine SHA for $repo version $latest_version" >&2
                      continue
                 fi
@@ -1259,9 +1269,9 @@ scan_files() {
             else
                 ! structured_output && $VERBOSE && msg "success" "  ✅ $repo is up-to-date ($current_version)"
             fi
-        done < <(yq -r '.jobs.*.steps[] | select(.uses) | [filename + ":" + (line), .uses] | @tsv' "$file")
+        done < <(yq -r '.. | select(tag == "!!map" and has("uses")) | [filename + ":" + (.uses | line), .uses] | @tsv' "$file")
 
-    done < <(find .github/workflows -name '*.yml')
+    done < <(find_action_files)
     return 0
 }
 
@@ -1283,7 +1293,7 @@ if $PUSH_PR; then
 elif $UPDATE; then
     if ! structured_output; then
         if (( UPDATE_COUNT == 0 )); then
-            msg "status" "No workflow updates were made."
+            msg "status" "No action updates were made."
         else
             msg "success" "Updated $UPDATE_COUNT action reference(s)."
         fi
