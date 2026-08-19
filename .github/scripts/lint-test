@@ -746,6 +746,25 @@ test_yaml_workflow_and_composite_action_scanning() {
     fail "-u should update actions in composite action.yml files"
 }
 
+test_composite_scan_prunes_excluded_directories() {
+  local case_dir="$TMP_ROOT/pruned-directories"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local output
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+  mkdir -p "$repo/node_modules"
+  chmod 000 "$repo/node_modules"
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -v 2>&1)
+  chmod 700 "$repo/node_modules"
+
+  [[ "$output" != *"Permission denied"* ]] ||
+    fail "composite action discovery should prune excluded directories"
+}
+
 test_pr_flow_stages_composite_action_updates() {
   local case_dir="$TMP_ROOT/composite-pr-flow"
   local bin_dir="$case_dir/bin"
@@ -1223,6 +1242,7 @@ test_quiet_scan_prints_current_directory
 test_verbose_scan_runs_after_option_parsing
 test_ci_scan_skips_spinner
 test_yaml_workflow_and_composite_action_scanning
+test_composite_scan_prunes_excluded_directories
 test_pr_flow_stages_composite_action_updates
 test_json_output_groups_findings_by_repo
 test_markdown_output_groups_findings_by_repo

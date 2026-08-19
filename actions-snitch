@@ -1105,9 +1105,9 @@ find_action_files() {
             find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \)
         fi
 
-        find . -type f \( -name 'action.yml' -o -name 'action.yaml' \) \
-            -not -path './.git/*' \
-            -not -path '*/node_modules/*'
+        find . \
+            \( -type d \( -name '.git' -o -name 'node_modules' \) -prune \) -o \
+            \( -type f \( -name 'action.yml' -o -name 'action.yaml' \) -print \)
     } | sed 's|^\./||' | sort -u
 }
 
