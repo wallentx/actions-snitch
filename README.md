@@ -1,13 +1,13 @@
 # actions-snitch
 
-Like dependabot, but in bash for local execution. This tool helps you identify and update outdated GitHub Actions in your workflow files.
+Like dependabot, but in bash for local execution. This tool helps you identify and update outdated GitHub Actions in workflow and composite-action files.
 
 <img width="3173" height="1161" alt="1000037896" src="https://github.com/user-attachments/assets/83e27000-7b8a-4f43-93e0-d7e310287225" />
 
 
 ## Features
 
-- 🔍 Scans all workflow files for outdated GitHub Actions
+- 🔍 Scans workflow and composite-action files for outdated GitHub Actions
 - 📍 Shows exact line numbers where actions are used
 - 🚀 Shows compatibility scores between versions
 - 💾 Caches API responses for faster subsequent runs (24h TTL)
@@ -75,13 +75,13 @@ PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Ac
 
 ## How It Works
 
-1. Scans all `.yml` files in `.github/workflows/`
+1. Scans `.yml` and `.yaml` files in `.github/workflows/`, plus `action.yml` and `action.yaml` composite actions
 2. For each GitHub Action found:
    - Records the exact line number where it's used
    - Checks the current version against the latest release
    - Fetches compatibility score from dependabot
    - Shows detailed information for outdated actions
-3. Optionally updates workflow files in-place
+3. Optionally updates workflow and composite-action files in-place
 4. Optionally commits the updates, pushes them, and creates a PR
 5. Skips internal/private actions and docker references
 

@@ -280,6 +280,40 @@ GIT
   chmod +x "$bindir/gh" "$bindir/curl" "$bindir/git"
 }
 
+write_commit_sha_release_stubs() {
+  local bindir="$1"
+
+  write_commit_sha_default_branch_stubs "$bindir"
+
+  cat > "$bindir/gh" <<'GH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "api" ]]; then
+  case "${2:-}" in
+    repos/actions/checkout/releases/latest)
+      printf 'v7.0.1\n'
+      ;;
+    repos/actions/checkout)
+      printf 'main\n'
+      ;;
+    repos/actions/checkout/commits/v7.0.1)
+      printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
+      ;;
+    *)
+      printf 'unexpected gh api endpoint: %s\n' "${2:-}" >&2
+      exit 1
+      ;;
+  esac
+else
+  printf 'unexpected gh args: %s\n' "$*" >&2
+  exit 1
+fi
+GH
+
+  chmod +x "$bindir/gh"
+}
+
 write_null_release_body_stubs() {
   local bindir="$1"
   local pr_log="$2"
@@ -338,6 +372,37 @@ YAML
   git -C "$repo" config user.email test@example.com
   git -C "$repo" config user.name Test
   git -C "$repo" add .github/workflows/build.yml
+  git -C "$repo" commit -q -m init
+}
+
+init_yaml_and_composite_repo() {
+  local repo="$1"
+
+  mkdir -p "$repo/.github/workflows" "$repo/.github/actions/helper"
+  cat > "$repo/.github/workflows/build.yaml" <<'YAML'
+name: test
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+YAML
+  cat > "$repo/.github/actions/helper/action.yml" <<'YAML'
+name: Helper
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v5
+      with:
+        path: /tmp/cache
+        key: test
+YAML
+
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  git -C "$repo" add .github/workflows/build.yaml .github/actions/helper/action.yml
   git -C "$repo" commit -q -m init
 }
 
@@ -637,6 +702,72 @@ test_quiet_scan_prints_current_directory() {
     fail "quiet scan output should mark verified creators"
 }
 
+test_verbose_scan_runs_after_option_parsing() {
+  local case_dir="$TMP_ROOT/verbose-scan"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local output
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -v)
+
+  [[ "$output" == *"Checking file: .github/workflows/build.yml"* ]] ||
+    fail "-v should continue past option parsing and list scanned files"
+  [[ "$output" == *"Findings in .github/workflows/build.yml:"* ]] ||
+    fail "-v should report outdated actions"
+}
+
+test_yaml_workflow_and_composite_action_scanning() {
+  local case_dir="$TMP_ROOT/yaml-and-composite"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local repo_name output
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_yaml_and_composite_repo "$repo"
+  repo_name=$(basename "$repo")
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
+
+  [[ "$(jq -r --arg repo "$repo_name" '[.[$repo][] | select(.file == ".github/workflows/build.yaml" and .action == "actions/checkout@v2")] | length' <<< "$output")" == "1" ]] ||
+    fail "scanner should find actions in .yaml workflow files"
+  [[ "$(jq -r --arg repo "$repo_name" '[.[$repo][] | select(.file == ".github/actions/helper/action.yml" and .action == "actions/cache@v5")] | length' <<< "$output")" == "1" ]] ||
+    fail "scanner should find actions in composite action.yml files"
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u >/dev/null)
+
+  grep -q 'actions/checkout@v4' "$repo/.github/workflows/build.yaml" ||
+    fail "-u should update actions in .yaml workflow files"
+  grep -q 'actions/cache@v6' "$repo/.github/actions/helper/action.yml" ||
+    fail "-u should update actions in composite action.yml files"
+}
+
+test_pr_flow_stages_composite_action_updates() {
+  local case_dir="$TMP_ROOT/composite-pr-flow"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local origin="$case_dir/origin.git"
+  local pr_log="$case_dir/pr.log"
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90 "$pr_log"
+  init_yaml_and_composite_repo "$repo"
+  git init --bare -q "$origin"
+  git -C "$repo" remote add origin "$origin"
+  git -C "$repo" push -q -u origin main
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -b actions-update >/dev/null)
+
+  git -C "$repo" diff-tree --no-commit-id --name-only -r HEAD | grep -q '^.github/actions/helper/action.yml$' ||
+    fail "-p should include composite action updates in the commit"
+  [[ -z "$(git -C "$repo" status --short)" ]] ||
+    fail "-p should leave the worktree clean after committing composite action updates"
+}
+
 test_ci_scan_skips_spinner() {
   local case_dir="$TMP_ROOT/ci-scan"
   local bin_dir="$case_dir/bin"
@@ -778,6 +909,23 @@ test_commit_sha_default_branch_finding_has_no_release_notes_url() {
     fail "commit SHA default-branch finding should not emit a release-notes URL"
   [[ "$output" != *"/releases/tag/vmain"* ]] ||
     fail "commit SHA default-branch finding should not emit a vmain release URL"
+}
+
+test_commit_sha_release_uses_tag_ref_for_commit_lookup() {
+  local case_dir="$TMP_ROOT/commit-sha-release"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/actions-snitch-fixture"
+  local repo_name output
+
+  mkdir -p "$repo"
+  write_commit_sha_release_stubs "$bin_dir"
+  init_commit_sha_repo "$repo"
+  repo_name=$(basename "$repo")
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
+
+  [[ "$(jq -r --arg repo "$repo_name" '.[$repo][0].latest' <<< "$output")" == "7.0.1" ]] ||
+    fail "commit SHA finding should resolve the latest release through its v-prefixed tag"
 }
 
 test_output_format_validation() {
@@ -1072,12 +1220,16 @@ test_update_branch_creation
 test_force_gate
 test_verified_creator_update_gate
 test_quiet_scan_prints_current_directory
+test_verbose_scan_runs_after_option_parsing
 test_ci_scan_skips_spinner
+test_yaml_workflow_and_composite_action_scanning
+test_pr_flow_stages_composite_action_updates
 test_json_output_groups_findings_by_repo
 test_markdown_output_groups_findings_by_repo
 test_yaml_output_groups_findings_by_repo
 test_structured_output_omits_repo_when_no_findings
 test_commit_sha_default_branch_finding_has_no_release_notes_url
+test_commit_sha_release_uses_tag_ref_for_commit_lookup
 test_output_format_validation
 test_pr_flow
 test_pr_body_multiple_updates
