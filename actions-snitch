@@ -1179,9 +1179,11 @@ fallback_ai_assessment() {
 
 # Share the same conservative name and expression checks with remediation validation.
 AI_SENSITIVE_NAME_FILTER='def sensitive_input_name:
+    gsub("(?<left>[A-Z])(?<right>[A-Z][a-z])"; "\(.left)_\(.right)") |
     gsub("(?<left>[a-z0-9])(?<right>[A-Z])"; "\(.left)_\(.right)") |
     test("(^|[-_.])(token|password|secret|credentials?|api[-_.]?key|private[-_.]?key|ssh[-_.]?key|auth|authorization)([-_.]|$)"; "i");'
-AI_SECRET_REFERENCE_PATTERN='\bsecrets[[:space:]]*(\.|\[)'
+# Include whole-context expressions such as toJSON(secrets).
+AI_SECRET_REFERENCE_PATTERN='\bsecrets\b'
 
 sanitize_usage_json() {
     jq -c --arg secret_pattern "$AI_SECRET_REFERENCE_PATTERN" "$AI_SENSITIVE_NAME_FILTER"'
