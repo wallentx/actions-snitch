@@ -57,7 +57,10 @@ if [[ "\${1:-}" == "api" ]]; then
       printf 'main\\n'
       ;;
     repos/actions/checkout/releases/tags/v4)
-      printf '## What changed\\n- Harden checkout token handling\\n'
+      exit 1
+      ;;
+    'repos/actions/checkout/releases?per_page=100')
+      printf 'v4.0.0\\tHarden checkout token handling\\thttps://github.com/actions/checkout/releases/tag/v4.0.0\\n'
       ;;
     repos/actions/cache/releases/tags/v6)
       printf '## What changed\\n- Improve cache lookup behavior\\n'
@@ -67,6 +70,9 @@ if [[ "\${1:-}" == "api" ]]; then
       ;;
     repos/actions/cache/compare/v5...v6)
       printf 'cab6789\\tImprove cache lookup behavior\\thttps://github.com/actions/cache/commit/cab6789\\n'
+      ;;
+    search/issues)
+      printf 'Checkout v4 regression\\thttps://github.com/actions/checkout/issues/999\\tclosed\\tFixed in v4\\n'
       ;;
     *)
       printf 'unexpected gh api endpoint: %s\\n' "\${2:-}" >&2
@@ -115,6 +121,98 @@ esac
 CURL
 
   chmod +x "$bindir/gh" "$bindir/curl"
+}
+
+write_ai_stub() {
+  local bindir="$1"
+  local decision="$2"
+  local llm_log="$3"
+
+  cat > "$bindir/llm" <<LLM
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\\n' "\$*" > "${llm_log}.args"
+prompt=\$(cat)
+printf '%s' "\$prompt" > "${llm_log}.prompt"
+
+case "$decision" in
+  invalid)
+    printf 'not-json\\n'
+    ;;
+  remediate)
+    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$prompt")
+    jq -cn --argjson line "\$line" '{
+      decision: "allow",
+      confidence: "high",
+      summary: "The checkout upgrade is compatible after changing fetch-depth.",
+      findings: [{
+        caution_detail: "Checkout fetch behavior changed.",
+        safety: "Using fetch-depth 1 avoids the incompatible full-history behavior.",
+        evidence: "release_notes"
+      }],
+      remediations: [
+        {
+          file: ".github/workflows/build.yml",
+          line: \$line,
+          input: "fetch-depth",
+          operation: "set",
+          current_value: "0",
+          new_value: "1",
+          reason: "The proposed version requires a shallow checkout in this workflow."
+        },
+        {
+          file: ".github/workflows/build.yml",
+          line: \$line,
+          input: "clean",
+          operation: "remove",
+          current_value: "true",
+          new_value: "<removed>",
+          reason: "The proposed version should use its new clean default."
+        }
+      ]
+    }'
+    ;;
+  unsafe-remediation)
+    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$prompt")
+    jq -cn --argjson line "\$line" '{
+      decision: "allow",
+      confidence: "high",
+      summary: "Unsafe remediation proposal.",
+      findings: [{
+        caution_detail: "Token behavior changed.",
+        safety: "A token change was proposed.",
+        evidence: "release_notes"
+      }],
+      remediations: [
+        {
+          file: ".github/workflows/build.yml",
+          line: \$line,
+          input: "fetch-depth",
+          operation: "set",
+          current_value: "0",
+          new_value: "1",
+          reason: "This valid change must not be partially applied."
+        },
+        {
+          file: ".github/workflows/build.yml",
+          line: \$line,
+          input: "token",
+          operation: "set",
+          current_value: "<redacted>",
+          new_value: "unsafe",
+          reason: "This must be rejected as a sensitive input."
+        }
+      ]
+    }'
+    ;;
+  *)
+    printf '%s\\n' '{"decision":"$decision","confidence":"high","summary":"The observed checkout configuration is compatible with v4.","findings":[{"caution_detail":"Checkout token handling changed.","safety":"The workflow uses an explicit token and remains compatible.","evidence":"release_notes"}],"remediations":[]}'
+    ;;
+esac
+LLM
+
+  chmod +x "$bindir/llm"
 }
 
 write_multi_action_stubs() {
@@ -366,6 +464,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+YAML
+
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  git -C "$repo" add .github/workflows/build.yml
+  git -C "$repo" commit -q -m init
+}
+
+init_ai_workflow_repo() {
+  local repo="$1"
+
+  mkdir -p "$repo/.github/workflows"
+  cat > "$repo/.github/workflows/build.yml" <<'YAML'
+name: test
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      INTERNAL_TOKEN: TOP_SECRET_MARKER
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+          clean: true
+          token: ${{ secrets.CHECKOUT_TOKEN }}
+      - run: git status --short
 YAML
 
   git -C "$repo" init -q -b main
@@ -659,6 +787,128 @@ test_force_gate() {
   (cd "$force_dir/repo" && PATH="$force_dir/bin:$PATH" XDG_CACHE_HOME="$force_dir/cache" "$SCRIPT" -u -f >/dev/null)
   [[ "$(workflow_ref "$force_dir/repo")" == *"actions/checkout@v4"* ]] ||
     fail "-u -f should apply low compatibility updates"
+}
+
+test_ai_allows_low_score_update_and_redacts_context() {
+  local case_dir="$TMP_ROOT/ai-allow"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local llm_log="$case_dir/llm"
+  local args prompt
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 50
+  write_ai_stub "$bin_dir" allow "$llm_log"
+  init_ai_workflow_repo "$repo"
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
+
+  [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+    fail "AI allow decision should apply a low compatibility update"
+  args=$(cat "${llm_log}.args")
+  [[ "$args" == *"--no-log"* && "$args" == *"--schema"* && "$args" == *"--model test-model"* ]] ||
+    fail "AI invocation should disable logging and request schema-constrained output"
+  prompt=$(cat "${llm_log}.prompt")
+  [[ "$prompt" == *'"fetch-depth":0'* ]] ||
+    fail "AI evidence should include the action's exact input configuration"
+  [[ "$prompt" == *'"action_lines":['* ]] ||
+    fail "AI evidence should include stable action line selectors"
+  [[ "$prompt" == *'"<redacted>"'* ]] ||
+    fail "AI evidence should mark redacted values"
+  [[ "$prompt" != *"TOP_SECRET_MARKER"* && "$prompt" != *"CHECKOUT_TOKEN"* ]] ||
+    fail "AI evidence should not include environment values or secret expressions"
+}
+
+test_ai_rejects_unsafe_remediation() {
+  local case_dir="$TMP_ROOT/ai-unsafe-remediation"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local output
+
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 50
+  write_ai_stub "$bin_dir" unsafe-remediation "$case_dir/llm"
+  init_ai_workflow_repo "$repo"
+
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TERM=dumb "$SCRIPT" -u)
+
+  [[ "$(workflow_ref "$repo")" == *"actions/checkout@v2"* ]] ||
+    fail "a sensitive-input AI remediation should fail closed"
+  [[ "$(yq -r '.jobs.build.steps[0].with.fetch-depth' "$repo/.github/workflows/build.yml")" == "0" ]] ||
+    fail "a rejected AI remediation should not change workflow inputs"
+  [[ "$output" == *"could not be safely validated and applied"* ]] ||
+    fail "a rejected AI remediation should explain why the update was skipped"
+}
+
+test_ai_review_and_invalid_output_fail_closed() {
+  local review_dir="$TMP_ROOT/ai-review"
+  local invalid_dir="$TMP_ROOT/ai-invalid"
+  local output
+
+  mkdir -p "$review_dir/repo" "$invalid_dir/repo"
+  write_stubs "$review_dir/bin" 50
+  write_ai_stub "$review_dir/bin" review "$review_dir/llm"
+  init_ai_workflow_repo "$review_dir/repo"
+
+  output=$(cd "$review_dir/repo" && PATH="$review_dir/bin:$PATH" XDG_CACHE_HOME="$review_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TERM=dumb "$SCRIPT" -u)
+  [[ "$(workflow_ref "$review_dir/repo")" == *"actions/checkout@v2"* ]] ||
+    fail "AI review decision should leave a low compatibility update unchanged"
+  [[ "$output" == *"after AI decision 'review'"* ]] ||
+    fail "AI review decision should explain why the update was skipped"
+
+  write_stubs "$invalid_dir/bin" 50
+  write_ai_stub "$invalid_dir/bin" invalid "$invalid_dir/llm"
+  init_ai_workflow_repo "$invalid_dir/repo"
+
+  (cd "$invalid_dir/repo" && PATH="$invalid_dir/bin:$PATH" XDG_CACHE_HOME="$invalid_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
+  [[ "$(workflow_ref "$invalid_dir/repo")" == *"actions/checkout@v2"* ]] ||
+    fail "invalid AI output should fail closed"
+}
+
+test_ai_config_adds_investigation_to_pr_body() {
+  local case_dir="$TMP_ROOT/ai-pr-body"
+  local bin_dir="$case_dir/bin"
+  local repo="$case_dir/repo"
+  local origin="$case_dir/origin.git"
+  local pr_log="$case_dir/pr.log"
+  local config_dir="$case_dir/config/actions-snitch"
+  local body
+
+  mkdir -p "$repo" "$config_dir"
+  write_stubs "$bin_dir" 50 "$pr_log"
+  write_ai_stub "$bin_dir" remediate "$case_dir/llm"
+  init_ai_workflow_repo "$repo"
+  cat > "$config_dir/config.yaml" <<'YAML'
+ai:
+  enabled: true
+  backend: llm
+  model: test-model
+  threshold: 80
+  issue_search: auto
+YAML
+  git init --bare -q "$origin"
+  git -C "$repo" remote add origin "$origin"
+  git -C "$repo" push -q -u origin main
+
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CONFIG_HOME="$case_dir/config" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -b actions-update >/dev/null)
+
+  body=$(cat "$pr_log")
+  [[ "$body" == *"<summary>Investigation: Compatibility & Safety Details</summary>"* ]] ||
+    fail "AI-assisted PR body should include a collapsible investigation section"
+  [[ "$body" == *"* **Caution Detail:** Checkout fetch behavior changed."* ]] ||
+    fail "AI-assisted PR body should include the compatibility caution"
+  [[ "$body" == *"* **Safety:** Using fetch-depth 1 avoids the incompatible full-history behavior."* ]] ||
+    fail "AI-assisted PR body should include the configuration-specific safety finding"
+  [[ "$body" == *"* **Remediation:** Set <code>fetch-depth</code> from <code>0</code> to <code>1</code>"* ]] ||
+    fail "AI-assisted PR body should describe the applied remediation"
+  [[ "$body" == *"* **Remediation:** Remove <code>clean</code> (currently <code>true</code>)"* ]] ||
+    fail "AI-assisted PR body should describe a removed action input"
+  [[ "$(yq -r '.jobs.build.steps[0].with.fetch-depth' "$repo/.github/workflows/build.yml")" == "1" ]] ||
+    fail "AI remediation should update the approved action input"
+  [[ "$(yq -r '.jobs.build.steps[0].with | has("clean")' "$repo/.github/workflows/build.yml")" == "false" ]] ||
+    fail "AI remediation should remove the approved action input"
+  [[ "$body" == *"<sub>Findings and PR created by [actions-snitch](https://github.com/wallentx/actions-snitch).</sub>"* ]] ||
+    fail "AI-assisted PR body should retain the linked actions-snitch footer"
 }
 
 test_verified_creator_update_gate() {
@@ -1237,6 +1487,10 @@ test_option_validation
 test_update_in_place
 test_update_branch_creation
 test_force_gate
+test_ai_allows_low_score_update_and_redacts_context
+test_ai_review_and_invalid_output_fail_closed
+test_ai_rejects_unsafe_remediation
+test_ai_config_adds_investigation_to_pr_body
 test_verified_creator_update_gate
 test_quiet_scan_prints_current_directory
 test_verbose_scan_runs_after_option_parsing

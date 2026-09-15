@@ -12,6 +12,7 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 - 🚀 Shows compatibility scores between versions
 - 💾 Caches API responses for faster subsequent runs (24h TTL)
 - 🔄 Can automatically create PRs to update actions
+- 🤖 Can ask an optional, provider-neutral LLM to investigate low compatibility scores before updating
 - ☑️ Indicates GitHub Marketplace verified creators
 - 🎨 Cute color-coded output with status badges
 - 🏃 Fast local execution
@@ -24,6 +25,8 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 - `yq`
 - `curl`
 - `git`
+
+AI-assisted updates additionally require Simon Willison's [`llm` CLI](https://llm.datasette.io/en/stable/setup.html) and a schema-capable model. Provider plugins are listed in the [`llm` plugin directory](https://llm.datasette.io/en/stable/plugins/directory.html).
 
 ## Installation
 
@@ -69,9 +72,44 @@ Use `-t` with `-u` or `-p` to update only actions from verified creators. This g
 
 Markdown output links the repository heading to the `origin` remote when one is configured.
 
+### AI-Assisted Updates
+
+AI analysis is opt-in and only runs during `-u` or `-p` when an action's compatibility score is below the configured threshold. The model receives redacted workflow context, release and changelog content, action definitions, compare commits, and a bounded upstream issue search. It must return a schema-validated `allow`, `review`, or `block` decision.
+
+An `allow` decision may include narrowly scoped remediation for the affected action step's `with:` inputs. Before making any change, actions-snitch verifies the workflow file, exact action line, current action version, input name, and current scalar value. Sensitive inputs, arbitrary YAML patches, permissions, triggers, environment variables, shell commands, and changes outside the affected action step are rejected. All proposed input changes are validated and applied to temporary copies first, so an invalid proposal cannot partially modify the repository. Errors and invalid responses fail closed; `-f` remains the explicit version-update override and never applies an unvalidated remediation.
+
+Create `~/.config/actions-snitch/config.yaml`, or use `$XDG_CONFIG_HOME/actions-snitch/config.yaml`:
+
+```yaml
+ai:
+  enabled: false
+  backend: llm
+  model: your-installed-model-id
+  threshold: 80
+  issue_search: auto
+  # Optional: require this environment variable to be set.
+  api_key_env: OPENAI_API_KEY
+```
+
+Store credentials with the provider's environment variable or the `llm` key store, not in this file. For example:
+
+```bash
+llm keys set openai
+ACTIONS_SNITCH_AI=true actions-snitch -u
+```
+
+Environment variables override the corresponding defaults:
+
+- `ACTIONS_SNITCH_AI=true|false`
+- `ACTIONS_SNITCH_AI_MODEL=model-id`
+- `ACTIONS_SNITCH_AI_THRESHOLD=0..100`
+- `ACTIONS_SNITCH_CONFIG=/path/to/config.yaml`
+
+The `llm` request uses `--no-log`, so workflow evidence is not written to its local prompt database. Redacted workflow evidence is still sent to the selected model provider; use a local model plugin when repository policy prohibits that.
+
 ### Pull Request Body
 
-PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count.
+PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count. AI-approved or forced low-score updates also include the model's validated compatibility investigation; successfully applied input remediations are listed in that same collapsible section.
 
 ## How It Works
 
