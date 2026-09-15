@@ -74,9 +74,9 @@ Markdown output links the repository heading to the `origin` remote when one is 
 
 ### AI-Assisted Updates
 
-AI analysis is opt-in and only runs during `-u` or `-p` when an action's compatibility score is below the configured threshold. The model receives redacted workflow context, release and changelog content, action definitions, compare commits, and a bounded upstream issue search. It must return a schema-validated `allow`, `review`, or `block` decision.
+AI analysis is opt-in and only runs during `-u` or `-p` when an action's compatibility score is below the configured threshold. The model receives redacted workflow context, release and changelog content, action definitions, compare commits, and a bounded upstream issue search. Scores below 80 still require AI approval or `-f`; lowering the AI threshold does not permit automatic updates between that threshold and 80. It must return a schema-validated `allow`, `review`, or `block` decision.
 
-An `allow` decision may include narrowly scoped remediation for the affected action step's `with:` inputs. Before making any change, actions-snitch verifies the workflow file, exact action line, current action version, input name, and current scalar value. Sensitive inputs, arbitrary YAML patches, permissions, triggers, environment variables, shell commands, and changes outside the affected action step are rejected. All proposed input changes are validated and applied to temporary copies first, so an invalid proposal cannot partially modify the repository. Errors and invalid responses fail closed; `-f` remains the explicit version-update override and never applies an unvalidated remediation.
+An `allow` decision may include narrowly scoped remediation for the affected action step's `with:` inputs. Before making any change, actions-snitch verifies the workflow file, exact action line, current action version, input name, and current scalar value. Sensitive inputs, arbitrary YAML patches, permissions, triggers, environment variables, shell commands, and changes outside the affected action step are rejected. All proposed input changes are validated and applied to temporary copies first, so an invalid proposal cannot partially modify the repository. Missing local usage evidence or either action definition, backend errors, and invalid responses fail closed; `-f` remains the explicit version-update override and never applies an unvalidated remediation.
 
 Create `~/.config/actions-snitch/config.yaml`, or use `$XDG_CONFIG_HOME/actions-snitch/config.yaml`:
 
@@ -88,7 +88,7 @@ ai:
   threshold: 80
   issue_search: auto
   # Optional: require this environment variable to be set.
-  api_key_env: OPENAI_API_KEY
+  # api_key_env: OPENAI_API_KEY
 ```
 
 Store credentials with the provider's environment variable or the `llm` key store, not in this file. For example:
@@ -109,7 +109,7 @@ The `llm` request uses `--no-log`, so workflow evidence is not written to its lo
 
 ### Pull Request Body
 
-PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count. AI-approved or forced low-score updates also include the model's validated compatibility investigation; successfully applied input remediations are listed in that same collapsible section.
+PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count. AI-approved updates or updates forced after an AI assessment also include the model's validated compatibility investigation; successfully applied input remediations are listed in that same collapsible section.
 
 ## How It Works
 

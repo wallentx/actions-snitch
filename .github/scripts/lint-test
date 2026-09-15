@@ -1481,6 +1481,200 @@ test_pr_body_dedupes_repeated_action_updates() {
     fail "PR body should not list individual workflow file paths"
 }
 
+write_ai_proposal_stub() {
+  local bindir="$1"
+  cat > "$bindir/llm" <<'LLM'
+#!/usr/bin/env bash
+set -euo pipefail
+prompt=$(cat)
+line=$(jq -r '.local_usages[0].action_lines[0]' <<< "$prompt")
+if [[ -n "${TEST_TARGET_PATH:-}" ]]; then
+  line=$(AI_TEST_PATH="$TEST_TARGET_PATH" yq -r '.. | select(tag == "!!map" and has("uses")) | select(.uses == strenv(AI_TEST_PATH)) | (.uses | line)' .github/workflows/build.yml)
+fi
+jq -cn --argjson line "$line" --arg input "$TEST_INPUT" \
+  --arg current "$TEST_CURRENT" --arg new "$TEST_NEW" '{
+  decision: "allow", confidence: "high", summary: "Test proposal",
+  findings: [{caution_detail: "Input changed", safety: "Apply the proposed input", evidence: "action_definition"}],
+  remediations: [{file: ".github/workflows/build.yml", line: $line, input: $input,
+    operation: "set", current_value: $current, new_value: $new, reason: "Test proposal"}]
+}'
+LLM
+  chmod +x "$bindir/llm"
+}
+
+test_ai_redaction_variants() {
+  local case_dir="$TMP_ROOT/ai-redaction-variants"
+  local repo="$case_dir/repo" name
+  mkdir -p "$repo"
+  write_stubs "$case_dir/bin" 50
+  write_ai_stub "$case_dir/bin" allow "$case_dir/llm"
+  init_ai_workflow_repo "$repo"
+  yq -i '.jobs.build.steps[0].env.LOCAL = "PRIVATE_ENV_MARKER" |
+    .jobs.build.steps[0].with.token = "PRIVATE_LITERAL_MARKER" |
+    .jobs.build.steps[0].with.githubToken = "PRIVATE_CAMEL_MARKER" |
+    .jobs.build.steps[0].with.apiToken = "PRIVATE_API_MARKER" |
+    .jobs.build.steps[0].with.clientSecret = "PRIVATE_CLIENT_MARKER" |
+    .jobs.build.steps[0].with.authToken = "PRIVATE_AUTH_MARKER"' "$repo/.github/workflows/build.yml"
+  for name in bracket nested whitespace; do
+    # shellcheck disable=SC2016
+    case "$name" in
+      bracket) TEST_EXPRESSION='${{ secrets['\''PRIVATE_BRACKET_MARKER'\''] }}' ;;
+      nested) TEST_EXPRESSION='${{ format("{0}", secrets.PRIVATE_NESTED_MARKER) }}' ;;
+      whitespace) TEST_EXPRESSION='${{ SeCrEtS [ "PRIVATE_WHITESPACE_MARKER" ] }}' ;;
+    esac
+    TEST_NAME="$name" TEST_EXPRESSION="$TEST_EXPRESSION" yq -i '.jobs.build.steps[0].with[strenv(TEST_NAME)] = strenv(TEST_EXPRESSION)' "$repo/.github/workflows/build.yml"
+  done
+  (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
+  ! grep -q 'PRIVATE_\|CHECKOUT_TOKEN\|TOP_SECRET_MARKER' "$case_dir/llm.prompt" || fail "secret redaction variants leaked into the prompt"
+  jq -e '.local_usages[0].document.jobs.build.steps[0] | .env.LOCAL == "<redacted>" and .with.token == "<redacted>" and .with.githubToken == "<redacted>" and .with["fetch-depth"] == 0' "$case_dir/llm.prompt" >/dev/null || fail "env and with must be independently redacted while preserving safe inputs"
+}
+
+test_ai_threshold_policy() {
+  local threshold score expected invoked force case_dir output
+  while read -r threshold score expected invoked force; do
+    case_dir="$TMP_ROOT/ai-threshold-$threshold-$score-$force"
+    mkdir -p "$case_dir/repo"
+    write_stubs "$case_dir/bin" "$score"
+    write_ai_stub "$case_dir/bin" allow "$case_dir/llm"
+    init_workflow_repo "$case_dir/repo"
+    output=$(cd "$case_dir/repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model ACTIONS_SNITCH_AI_THRESHOLD="$threshold" "$SCRIPT" -u ${force:+-f})
+    [[ "$(workflow_ref "$case_dir/repo")" == *"actions/checkout@v$expected"* ]] || fail "incorrect update gate for threshold $threshold and score $score"
+    if [[ "$invoked" == yes ]]; then
+      [[ -f "$case_dir/llm.prompt" ]] || fail "AI was not invoked at decimal threshold $threshold"
+    else
+      [[ ! -f "$case_dir/llm.prompt" ]] || fail "AI was invoked outside threshold $threshold"
+    fi
+    [[ "$output" != *"value too great for base"* ]] || fail "threshold was parsed as octal"
+  done <<'CASES'
+50 70 2 no
+0 70 2 no
+08 7 4 yes
+010 9 4 yes
+00080 79 4 yes
+100 90 4 yes
+80 80 4 no
+50 70 4 no force
+CASES
+  for threshold in 101 999999999999999999999999999999999 08x; do
+    if (cd "$case_dir/repo" && PATH="$case_dir/bin:$PATH" ACTIONS_SNITCH_AI_THRESHOLD="$threshold" "$SCRIPT" -u >/dev/null 2>&1); then
+      fail "invalid threshold $threshold should be rejected"
+    fi
+  done
+}
+
+test_ai_rejects_remediation_variants() {
+  local variant case_dir repo input current new original
+  for variant in githubToken apiToken clientSecret authToken bracket whitespace nested map sequence; do
+    case_dir="$TMP_ROOT/ai-reject-$variant"
+    repo="$case_dir/repo"
+    mkdir -p "$repo"
+    write_stubs "$case_dir/bin" 50
+    write_ai_proposal_stub "$case_dir/bin"
+    init_ai_workflow_repo "$repo"
+    input="$variant" current=0 new=1
+    # shellcheck disable=SC2016
+    case "$variant" in
+      githubToken|apiToken|clientSecret|authToken)
+        TEST_INPUT="$input" yq -i '.jobs.build.steps[0].with[strenv(TEST_INPUT)] = 0' "$repo/.github/workflows/build.yml" ;;
+      bracket) input=fetch-depth; new='${{ secrets['\''TOKEN'\''] }}' ;;
+      whitespace) input=fetch-depth; new='${{ SeCrEtS [ "TOKEN" ] }}' ;;
+      nested) input=fetch-depth; new='${{ format("{0}", secrets.TOKEN) }}' ;;
+      map|sequence)
+        input=fetch-depth
+        if [[ "$variant" == map ]]; then
+          yq -i '.jobs.build.steps[0].with.fetch-depth = {"depth": 0}' "$repo/.github/workflows/build.yml"
+        else
+          yq -i '.jobs.build.steps[0].with.fetch-depth = [0, 1]' "$repo/.github/workflows/build.yml"
+        fi
+        current=$(yq -r '.jobs.build.steps[0].with.fetch-depth | tostring' "$repo/.github/workflows/build.yml") ;;
+    esac
+    original=$(cat "$repo/.github/workflows/build.yml")
+    (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TEST_INPUT="$input" TEST_CURRENT="$current" TEST_NEW="$new" "$SCRIPT" -u >/dev/null)
+    [[ "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] || fail "$variant remediation should leave the entire workflow unchanged"
+  done
+}
+
+test_ai_missing_required_evidence() {
+  local variant case_dir repo original real_yq
+  real_yq=$(command -v yq)
+  for variant in current-definition latest-definition usage-error empty-usages; do
+    case_dir="$TMP_ROOT/ai-missing-$variant"
+    repo="$case_dir/repo"
+    mkdir -p "$repo"
+    write_stubs "$case_dir/bin" 50
+    write_ai_stub "$case_dir/bin" allow "$case_dir/llm"
+    init_ai_workflow_repo "$repo"
+    if [[ "$variant" == *definition ]]; then
+      mv "$case_dir/bin/curl" "$case_dir/bin/curl-real"
+      cat > "$case_dir/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+case "$*" in
+  *"/$TEST_MISSING_REF/"*action.y*) exit 22 ;;
+esac
+exec "$(dirname "$0")/curl-real" "$@"
+CURL
+      chmod +x "$case_dir/bin/curl"
+    else
+      cat > "$case_dir/bin/yq" <<'YQ'
+#!/usr/bin/env bash
+if [[ -n "${AI_ACTION_PATH:-}" && "$*" == *action_lines* ]]; then
+  [[ "$TEST_EVIDENCE_VARIANT" == empty-usages ]] && exit 0
+  exit 1
+fi
+exec "$TEST_REAL_YQ" "$@"
+YQ
+      chmod +x "$case_dir/bin/yq"
+    fi
+    original=$(cat "$repo/.github/workflows/build.yml")
+    (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TEST_MISSING_REF="$([[ "$variant" == current-definition ]] && echo v2 || echo v4)" TEST_REAL_YQ="$real_yq" TEST_EVIDENCE_VARIANT="$variant" "$SCRIPT" -u >/dev/null)
+    [[ ! -f "$case_dir/llm.prompt" ]] || fail "$variant should prevent model invocation"
+    [[ "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] || fail "$variant should prevent workflow changes"
+  done
+}
+
+test_ai_subpath_identity() {
+  local case_dir="$TMP_ROOT/ai-subpaths" repo body mode original
+  for mode in assess cross-path; do
+    repo="$case_dir/$mode/repo"
+    mkdir -p "$repo"
+    write_stubs "$case_dir/$mode/bin" 50 "$case_dir/$mode/pr.log"
+    init_ai_workflow_repo "$repo"
+    yq -i '.jobs.build.steps[0].uses = "actions/checkout/foo@v2" |
+      .jobs.build.steps[1] = {"uses": "actions/checkout/bar@v2", "with": {"fetch-depth": 0}}' "$repo/.github/workflows/build.yml"
+    if [[ "$mode" == assess ]]; then
+      cat > "$case_dir/$mode/bin/llm" <<'LLM'
+#!/usr/bin/env bash
+set -euo pipefail
+prompt=$(cat)
+printf '%s\n' "$prompt" >> "$TEST_PROMPTS"
+jq -cn --arg path "$(jq -r '.upgrade.action_path' <<< "$prompt")" '{
+  decision: "allow", confidence: "high", summary: $path,
+  findings: [{caution_detail: $path, safety: "Path-specific assessment", evidence: "action_definition"}], remediations: []
+}'
+LLM
+      chmod +x "$case_dir/$mode/bin/llm"
+      git -C "$repo" add .
+      git -C "$repo" commit -qm 'Add subactions'
+      git init --bare -q "$case_dir/$mode/origin.git"
+      git -C "$repo" remote add origin "$case_dir/$mode/origin.git"
+      git -C "$repo" push -qu origin main
+      (cd "$repo" && PATH="$case_dir/$mode/bin:$PATH" XDG_CACHE_HOME="$case_dir/$mode/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TEST_PROMPTS="$case_dir/prompts" "$SCRIPT" -p -b actions-update >/dev/null)
+      jq -se 'length == 2 and ([.[].upgrade.action_path] | sort) == ["actions/checkout/bar", "actions/checkout/foo"] and all(.[]; .local_usages[0].action_lines | length == 1)' "$case_dir/prompts" >/dev/null || fail "subactions need separate assessments and exact usage selectors"
+      [[ "$(yq -r '.jobs.build.steps[].uses' "$repo/.github/workflows/build.yml")" == $'actions/checkout/foo@v4\nactions/checkout/bar@v4' ]] || fail "full subaction refs should update"
+      body=$(cat "$case_dir/$mode/pr.log")
+      [[ "$body" == *'## [actions/checkout/foo]'*'* **Caution Detail:** actions/checkout/foo'*'## [actions/checkout/bar]'*'* **Caution Detail:** actions/checkout/bar'* ]] || fail "PR body must retain each subaction investigation"
+    else
+      write_ai_proposal_stub "$case_dir/$mode/bin"
+      original=$(cat "$repo/.github/workflows/build.yml")
+      # Always propose the other path's line so neither assessment can authorize it.
+      # shellcheck disable=SC2016
+      sed -i '/line=$(jq/a TEST_TARGET_PATH=$(jq -r '\''if .upgrade.action_path | endswith("/foo") then "actions/checkout/bar@v2" else "actions/checkout/foo@v2" end'\'' <<< "$prompt")' "$case_dir/$mode/bin/llm"
+      (cd "$repo" && PATH="$case_dir/$mode/bin:$PATH" XDG_CACHE_HOME="$case_dir/$mode/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TEST_INPUT=fetch-depth TEST_CURRENT=0 TEST_NEW=1 "$SCRIPT" -u >/dev/null)
+      [[ "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] || fail "cross-subaction remediation must be rejected"
+    fi
+  done
+}
+
 run_shellcheck
 run_syntax_checks
 test_option_validation
@@ -1491,6 +1685,11 @@ test_ai_allows_low_score_update_and_redacts_context
 test_ai_review_and_invalid_output_fail_closed
 test_ai_rejects_unsafe_remediation
 test_ai_config_adds_investigation_to_pr_body
+test_ai_redaction_variants
+test_ai_threshold_policy
+test_ai_rejects_remediation_variants
+test_ai_missing_required_evidence
+test_ai_subpath_identity
 test_verified_creator_update_gate
 test_quiet_scan_prints_current_directory
 test_verbose_scan_runs_after_option_parsing
