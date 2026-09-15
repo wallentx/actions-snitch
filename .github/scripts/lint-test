@@ -1515,9 +1515,10 @@ test_ai_redaction_variants() {
     .jobs.build.steps[0].with.apiToken = "PRIVATE_API_MARKER" |
     .jobs.build.steps[0].with.clientSecret = "PRIVATE_CLIENT_MARKER" |
     .jobs.build.steps[0].with.authToken = "PRIVATE_AUTH_MARKER"' "$repo/.github/workflows/build.yml"
-  for name in bracket nested whitespace; do
+  for name in bracket nested whitespace context; do
     # shellcheck disable=SC2016
     case "$name" in
+      context) TEST_EXPRESSION='${{ toJSON(secrets) }}' ;;
       bracket) TEST_EXPRESSION='${{ secrets['\''PRIVATE_BRACKET_MARKER'\''] }}' ;;
       nested) TEST_EXPRESSION='${{ format("{0}", secrets.PRIVATE_NESTED_MARKER) }}' ;;
       whitespace) TEST_EXPRESSION='${{ SeCrEtS [ "PRIVATE_WHITESPACE_MARKER" ] }}' ;;
@@ -1526,7 +1527,7 @@ test_ai_redaction_variants() {
   done
   (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
   ! grep -q 'PRIVATE_\|CHECKOUT_TOKEN\|TOP_SECRET_MARKER' "$case_dir/llm.prompt" || fail "secret redaction variants leaked into the prompt"
-  jq -e '.local_usages[0].document.jobs.build.steps[0] | .env.LOCAL == "<redacted>" and .with.token == "<redacted>" and .with.githubToken == "<redacted>" and .with["fetch-depth"] == 0' "$case_dir/llm.prompt" >/dev/null || fail "env and with must be independently redacted while preserving safe inputs"
+  jq -e '.local_usages[0].document.jobs.build.steps[0] | .env.LOCAL == "<redacted>" and .with.token == "<redacted>" and .with.githubToken == "<redacted>" and .with.context == "<redacted>" and .with["fetch-depth"] == 0' "$case_dir/llm.prompt" >/dev/null || fail "env and with must be independently redacted while preserving safe inputs"
 }
 
 test_ai_threshold_policy() {
@@ -1564,7 +1565,7 @@ CASES
 
 test_ai_rejects_remediation_variants() {
   local variant case_dir repo input current new original
-  for variant in githubToken apiToken clientSecret authToken bracket whitespace nested map sequence; do
+  for variant in githubToken apiToken clientSecret authToken SSHPrivateKey bracket whitespace nested context map sequence; do
     case_dir="$TMP_ROOT/ai-reject-$variant"
     repo="$case_dir/repo"
     mkdir -p "$repo"
@@ -1574,8 +1575,9 @@ test_ai_rejects_remediation_variants() {
     input="$variant" current=0 new=1
     # shellcheck disable=SC2016
     case "$variant" in
-      githubToken|apiToken|clientSecret|authToken)
+      githubToken|apiToken|clientSecret|authToken|SSHPrivateKey)
         TEST_INPUT="$input" yq -i '.jobs.build.steps[0].with[strenv(TEST_INPUT)] = 0' "$repo/.github/workflows/build.yml" ;;
+      context) input=fetch-depth; new='${{ toJSON(secrets) }}' ;;
       bracket) input=fetch-depth; new='${{ secrets['\''TOKEN'\''] }}' ;;
       whitespace) input=fetch-depth; new='${{ SeCrEtS [ "TOKEN" ] }}' ;;
       nested) input=fetch-depth; new='${{ format("{0}", secrets.TOKEN) }}' ;;
