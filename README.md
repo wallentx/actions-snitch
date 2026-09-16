@@ -36,11 +36,12 @@ AI-assisted updates additionally require Simon Willison's [`llm` CLI](https://ll
 ## Usage
 
 ```bash
-actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]
+actions-snitch [-c] [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]
 ```
 
 ### Options
 
+- `-c` Interactively create the config file and exit (use alone)
 - `-u` Update outdated actions in-place
 - `-f` Force updates regardless of compatibility score (requires -u or -p)
 - `-p` Commit, push, and create a pull request after updating actions (implies -u)
@@ -78,7 +79,17 @@ AI analysis is opt-in and only runs during `-u` or `-p` when an action's compati
 
 An `allow` decision may include narrowly scoped remediation for the affected action step's `with:` inputs. Before making any change, actions-snitch verifies the workflow file, exact action line and full action path, current action version, input name, and current scalar value. Sensitive inputs, arbitrary YAML patches, permissions, triggers, environment variables, shell commands, and changes outside the affected action step are rejected. All proposed input changes are validated and applied to temporary copies first, so an invalid proposal cannot partially modify the repository. Missing local usage evidence or either action definition, backend errors, and invalid responses fail closed; `-f` remains the explicit version-update override and never applies an unvalidated remediation.
 
-Create `~/.config/actions-snitch/config.yaml`, or use `$XDG_CONFIG_HOME/actions-snitch/config.yaml`:
+Run the interactive setup:
+
+```bash
+actions-snitch -c
+```
+
+It asks whether to enable AI, which model to use, the compatibility threshold, upstream issue search policy, and an optional credential environment variable name. Use `llm models list` to find your model ID. AI stays disabled by default.
+
+Setup creates `~/.config/actions-snitch/config.yaml` (or `$XDG_CONFIG_HOME/actions-snitch/config.yaml`) with owner-only permissions. `ACTIONS_SNITCH_CONFIG` can select a different file. Existing files are never overwritten; edit them directly to change settings. Press Ctrl-C to cancel before writing. Setup only requires `jq` and `yq`, and does not scan or modify a repository.
+
+The generated file has this shape:
 
 ```yaml
 ai:

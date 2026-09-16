@@ -44,8 +44,9 @@ msg() {
 
 # Function to display usage
 usage() {
-    msg "header" "Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"
+    msg "header" "Usage: actions-snitch [-c] [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"
     msg "help" "Options:"
+    msg "success" "  -c    Interactively create the config file, then exit (use alone)"
     msg "success" "  -u    Update outdated actions in-place"
     msg "success" "  -f    Force updates regardless of compatibility score (requires -u or -p)"
     msg "success" "  -p    Commit, push, and create a pull request after updating actions (implies -u)"
@@ -143,16 +144,93 @@ load_ai_config() {
     fi
 }
 
-# Ensure required tools are installed
-for cmd in gh jq yq curl git; do
-    if ! command -v $cmd &>/dev/null; then
-        msg "error" "Error: $cmd is not installed."
-        exit 1
+setup_prompt() {
+    printf '%s' "$1" >&2
+    if ! IFS= read -r SETUP_ANSWER; then
+        printf '\nSetup cancelled: no config was written.\n' >&2
+        return 1
     fi
-done
+}
+
+configure() (
+    local enabled=false model="" threshold=80 issue_search=auto api_key_env="" config
+
+    if [[ -e "$ACTIONS_SNITCH_CONFIG_FILE" || -L "$ACTIONS_SNITCH_CONFIG_FILE" ]]; then
+        printf 'Config already exists; edit %s to change settings.\n' "$ACTIONS_SNITCH_CONFIG_FILE" >&2
+        return 1
+    fi
+    for cmd in jq yq; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            printf 'Error: %s is not installed.\n' "$cmd" >&2
+            return 1
+        fi
+    done
+
+    printf 'Create %s\nAI analysis sends redacted workflow context to your selected model provider.\n' "$ACTIONS_SNITCH_CONFIG_FILE" >&2
+    while true; do
+        setup_prompt 'Enable AI-assisted updates? [y/N]: ' || return 1
+        case "$SETUP_ANSWER" in
+            y|Y) enabled=true; break ;;
+            n|N|"") enabled=false; break ;;
+            *)
+                if enabled=$(parse_boolean "$SETUP_ANSWER"); then break; fi
+                printf 'Enter yes or no.\n' >&2
+                ;;
+        esac
+    done
+    printf 'Backend: llm. Use "llm models list" to find an installed model ID.\n' >&2
+    while true; do
+        setup_prompt 'Model ID (required when AI is enabled): ' || return 1
+        model="$SETUP_ANSWER"
+        if [[ "$enabled" == false || "$model" =~ [^[:space:]] ]]; then break; fi
+        printf 'Enter a model ID, or press Ctrl-C to cancel setup.\n' >&2
+    done
+    while true; do
+        setup_prompt 'Analyze compatibility scores below (0-100) [80]: ' || return 1
+        threshold="${SETUP_ANSWER:-80}"
+        threshold=$(printf '%s' "$threshold" | sed 's/^0*//')
+        threshold="${threshold:-0}"
+        if [[ "$threshold" =~ ^[0-9]+$ && ${#threshold} -le 3 ]] && (( 10#$threshold <= 100 )); then break; fi
+        printf 'Enter an integer from 0 to 100.\n' >&2
+    done
+    while true; do
+        setup_prompt 'Search upstream issues (auto/always/never) [auto]: ' || return 1
+        issue_search="${SETUP_ANSWER:-auto}"
+        case "$issue_search" in
+            auto|always|never) break ;;
+            *) printf 'Enter auto, always, or never.\n' >&2 ;;
+        esac
+    done
+    printf 'Keep credentials in the llm key store or an environment variable.\n' >&2
+    while true; do
+        setup_prompt 'API key environment variable NAME (optional; do not paste a key): ' || return 1
+        api_key_env="$SETUP_ANSWER"
+        if [[ -z "$api_key_env" || "$api_key_env" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then break; fi
+        printf 'Enter an environment variable name, such as OPENAI_API_KEY, or leave blank.\n' >&2
+    done
+
+    # Serialize user strings instead of interpolating them into YAML.
+    config=$(jq -n --argjson enabled "$enabled" --arg model "$model" \
+        --argjson threshold "$((10#$threshold))" --arg issue_search "$issue_search" \
+        --arg api_key_env "$api_key_env" '{ai: {
+            enabled: $enabled, backend: "llm", model: $model,
+            threshold: $threshold, issue_search: $issue_search
+        } | if $api_key_env == "" then . else . + {api_key_env: $api_key_env} end}') || return 1
+    config=$(printf '%s\n' "$config" | yq -P '.') || return 1
+
+    umask 077
+    mkdir -p "$(dirname "$ACTIONS_SNITCH_CONFIG_FILE")" || return 1
+    # Also refuse a file created by another process while the prompts were open.
+    if ! (set -o noclobber; printf '%s\n' "$config" > "$ACTIONS_SNITCH_CONFIG_FILE"); then
+        printf 'Error: could not create %s.\n' "$ACTIONS_SNITCH_CONFIG_FILE" >&2
+        return 1
+    fi
+    printf 'Created %s\n' "$ACTIONS_SNITCH_CONFIG_FILE" >&2
+)
 
 # Parse flags
 UPDATE=false
+CONFIGURE=false
 FORCE=false
 PUSH_PR=false
 TARGET_BRANCH=""
@@ -168,8 +246,9 @@ LOW_SCORE_THRESHOLD=80
 AI_ISSUE_SEARCH=auto
 AI_API_KEY_ENV=""
 
-while getopts ":ufpb:o:thv" opt; do
+while getopts ":cufpb:o:thv" opt; do
   case $opt in
+    c) CONFIGURE=true ;;
     u) UPDATE=true ;;
     f) FORCE=true ;;
     p) PUSH_PR=true ;;
@@ -181,6 +260,23 @@ while getopts ":ufpb:o:thv" opt; do
     \?) msg "error" "Invalid option -$OPTARG" >&2; usage ;;
     :) msg "error" "Option -$OPTARG requires an argument" >&2; usage ;;
   esac
+done
+
+if $CONFIGURE; then
+    if [[ $# -ne 1 || "$1" != "-c" ]]; then
+        msg "error" "Error: -c must be used alone" >&2
+        exit 1
+    fi
+    configure
+    exit $?
+fi
+
+# Setup needs only the YAML/JSON tools, and never starts a repository scan.
+for cmd in gh jq yq curl git; do
+    if ! command -v "$cmd" &>/dev/null; then
+        msg "error" "Error: $cmd is not installed."
+        exit 1
+    fi
 done
 
 if $PUSH_PR; then

@@ -705,10 +705,10 @@ test_option_validation() {
   local option_output="$TMP_ROOT/option-validation.out"
 
   output=$("$SCRIPT" -h)
-  [[ "$output" == *"Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
+  [[ "$output" == *"Usage: actions-snitch [-c] [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
     fail "help output does not document the expected usage"
   output=$(TERM=dumb "$SCRIPT" -h)
-  [[ "$output" == *"Usage: actions-snitch [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
+  [[ "$output" == *"Usage: actions-snitch [-c] [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
     fail "help output should work without color-capable terminal settings"
   [[ "$output" == *"  -o    Output findings as json, md, or yaml"* ]] ||
     fail "help output does not document the output option"
@@ -1677,8 +1677,73 @@ LLM
   done
 }
 
+test_interactive_config_setup() {
+  local case_dir="$TMP_ROOT/config-setup"
+  local config_file="$case_dir/xdg/actions-snitch/config.yaml"
+  local custom_file="$case_dir/custom/settings.yaml"
+  local model='provider/model: "quoted" # literal \\ value'
+  local cmd output original
+
+  mkdir -p "$case_dir/bin"
+  for cmd in gh curl git llm; do
+    printf '#!/usr/bin/env bash\nexit 99\n' > "$case_dir/bin/$cmd"
+    chmod +x "$case_dir/bin/$cmd"
+  done
+
+  # Setup works outside a repository, without scanning or invoking a provider.
+  (cd "$case_dir" && printf '\n\n\n\n\n' | PATH="$case_dir/bin:$PATH" \
+    ACTIONS_SNITCH_CONFIG="$config_file" "$SCRIPT" -c >/dev/null 2>&1)
+  [[ "$(yq -r '.ai.enabled' "$config_file")" == false ]] || fail "setup should default to AI disabled"
+  [[ "$(yq -r '.ai.model' "$config_file")" == "" ]] || fail "disabled AI may omit a model"
+  [[ "$(yq -r '.ai.threshold' "$config_file")" == 80 ]] || fail "setup threshold should default to 80"
+  [[ "$(yq -r '.ai.issue_search' "$config_file")" == auto ]] || fail "setup issue search should default to auto"
+  [[ "$(yq -r '.ai | has("api_key_env")' "$config_file")" == false ]] || fail "setup should omit an empty credential variable"
+  [[ "$(LC_ALL=C ls -l "$config_file")" == -rw-------* ]] || fail "config should have owner-only permissions"
+
+  original=$(cat "$config_file")
+  if ACTIONS_SNITCH_CONFIG="$config_file" "$SCRIPT" -c </dev/null >/dev/null 2>&1; then
+    fail "setup should refuse an existing file"
+  fi
+  [[ "$(cat "$config_file")" == "$original" ]] || fail "setup overwrote existing settings"
+
+  # Invalid answers must reprompt; model punctuation must survive YAML encoding.
+  output=$(printf '%s\n' maybe yes '' "$model" -1 101 2.5 008 always-no never 'not-a-variable' MODEL_API_KEY |
+    ACTIONS_SNITCH_CONFIG="$custom_file" XDG_CONFIG_HOME="$case_dir/unused" "$SCRIPT" -c 2>&1)
+  [[ "$output" == *'Enter yes or no.'* && "$output" == *'Enter a model ID'* ]] || fail "setup should validate enabled and model answers"
+  [[ "$output" == *'Enter an integer from 0 to 100.'* && "$output" == *'Enter auto, always, or never.'* ]] || fail "setup should validate threshold and issue search"
+  [[ "$output" == *'Enter an environment variable name'* ]] || fail "setup should validate credential names"
+  [[ "$(yq -r '.ai.enabled' "$custom_file")" == true ]] || fail "setup should enable AI when requested"
+  [[ "$(yq -r '.ai.model' "$custom_file")" == "$model" ]] || fail "setup should preserve model strings"
+  [[ "$(yq -r '.ai.threshold' "$custom_file")" == 8 ]] || fail "setup should normalize decimal thresholds"
+  [[ "$(yq -r '.ai.issue_search' "$custom_file")" == never ]] || fail "setup should save the issue search selection"
+  [[ "$(yq -r '.ai.api_key_env' "$custom_file")" == MODEL_API_KEY ]] || fail "setup should save the credential variable name"
+  [[ ! -e "$case_dir/unused" ]] || fail "explicit config path should override XDG_CONFIG_HOME"
+
+  (unset ACTIONS_SNITCH_CONFIG; printf '\n\n0\nalways\n\n' |
+    XDG_CONFIG_HOME="$case_dir/alternate" "$SCRIPT" -c >/dev/null 2>&1)
+  [[ -f "$case_dir/alternate/actions-snitch/config.yaml" ]] || fail "setup should respect XDG_CONFIG_HOME"
+  (unset ACTIONS_SNITCH_CONFIG XDG_CONFIG_HOME; printf '\n\n100\n\n\n' |
+    HOME="$case_dir/home" "$SCRIPT" -c >/dev/null 2>&1)
+  [[ -f "$case_dir/home/.config/actions-snitch/config.yaml" ]] || fail "setup should default to HOME/.config"
+
+  if printf 'yes\ntest-model\n' | ACTIONS_SNITCH_CONFIG="$case_dir/cancelled.yaml" "$SCRIPT" -c >/dev/null 2>&1; then
+    fail "setup should fail on incomplete input"
+  fi
+  [[ ! -e "$case_dir/cancelled.yaml" ]] || fail "cancelled setup should not write a config"
+  if ACTIONS_SNITCH_CONFIG="$case_dir/mixed.yaml" "$SCRIPT" -c -u </dev/null >/dev/null 2>&1; then
+    fail "setup should reject scan options"
+  fi
+  [[ ! -e "$case_dir/mixed.yaml" ]] || fail "mixed setup options should not write a config"
+  ln -s "$case_dir/missing-target" "$case_dir/link.yaml"
+  if ACTIONS_SNITCH_CONFIG="$case_dir/link.yaml" "$SCRIPT" -c </dev/null >/dev/null 2>&1; then
+    fail "setup should refuse dangling symlinks"
+  fi
+  [[ ! -e "$case_dir/missing-target" ]] || fail "setup should not follow dangling symlinks"
+}
+
 run_shellcheck
 run_syntax_checks
+test_interactive_config_setup
 test_option_validation
 test_update_in_place
 test_update_branch_creation
