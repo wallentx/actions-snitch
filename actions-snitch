@@ -212,10 +212,10 @@ configure() (
     # Serialize user strings instead of interpolating them into YAML.
     config=$(jq -n --argjson enabled "$enabled" --arg model "$model" \
         --argjson threshold "$((10#$threshold))" --arg issue_search "$issue_search" \
-        --arg api_key_env "$api_key_env" '{ai: {
+        --arg api_key_env "$api_key_env" '{ai: ({
             enabled: $enabled, backend: "llm", model: $model,
             threshold: $threshold, issue_search: $issue_search
-        } | if $api_key_env == "" then . else . + {api_key_env: $api_key_env} end}') || return 1
+        } | if $api_key_env == "" then . else . + {api_key_env: $api_key_env} end)}') || return 1
     config=$(printf '%s\n' "$config" | yq -P '.') || return 1
 
     umask 077
@@ -226,6 +226,7 @@ configure() (
         return 1
     fi
     printf 'Created %s\n' "$ACTIONS_SNITCH_CONFIG_FILE" >&2
+    return 0
 )
 
 # Parse flags
