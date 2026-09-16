@@ -79,6 +79,14 @@ if [[ "\${1:-}" == "api" ]]; then
       exit 1
       ;;
   esac
+elif [[ "\${1:-}" == "repo" && "\${2:-}" == "view" ]]; then
+  if [[ -n "\${TEST_PR_ORIGIN:-}" && "\${3:-}" != "\$TEST_PR_ORIGIN" ]]; then
+    printf 'PR metadata must be fetched from the origin push URL\\n' >&2
+    exit 1
+  fi
+  if [[ "\${TEST_PR_METADATA_FAILURE:-}" == true ]]; then exit 1; fi
+  jq -cn --arg url "\${TEST_PR_REPO_URL:-https://github.com/wallentx/actions-snitch-fixture}" \\
+    --arg base "\${TEST_PR_BASE-main}" '{url: \$url, defaultBranchRef: {name: \$base}}'
 elif [[ "\${1:-}" == "pr" && "\${2:-}" == "create" ]]; then
   printf '%s\\n' "\$*" > "$pr_log"
 else
@@ -256,6 +264,8 @@ if [[ "\${1:-}" == "api" ]]; then
       exit 1
       ;;
   esac
+elif [[ "\${1:-}" == "repo" && "\${2:-}" == "view" ]]; then
+  printf '%s\n' '{"url":"https://github.com/wallentx/actions-snitch-fixture","defaultBranchRef":{"name":"main"}}'
 elif [[ "\${1:-}" == "pr" && "\${2:-}" == "create" ]]; then
   printf '%s\n' "\$*" > "$pr_log"
 else
@@ -441,6 +451,8 @@ if [[ "\${1:-}" == "api" ]]; then
       exit 1
       ;;
   esac
+elif [[ "\${1:-}" == "repo" && "\${2:-}" == "view" ]]; then
+  printf '%s\\n' '{"url":"https://github.com/wallentx/actions-snitch-fixture","defaultBranchRef":{"name":"main"}}'
 elif [[ "\${1:-}" == "pr" && "\${2:-}" == "create" ]]; then
   printf '%s\\n' "\$*" > "$pr_log"
 else
@@ -1243,6 +1255,8 @@ test_pr_flow() {
     fail "-p -b did not push the target branch"
   [[ "$(cat "$pr_log")" == *"--head actions-update --base main"* ]] ||
     fail "-p -b did not create a PR for the target branch"
+  [[ "$(cat "$pr_log")" == *"--repo https://github.com/wallentx/actions-snitch-fixture"* ]] ||
+    fail "-p must explicitly select the origin repository"
   [[ "$(cat "$pr_log")" == *"Bumps the github-actions group with 1 update: [actions/checkout](https://github.com/actions/checkout)."* ]] ||
     fail "PR body should include the Dependabot-inspired summary"
   [[ "$(cat "$pr_log")" == *"Updates \`actions/checkout\` from 2 to 4"* ]] ||
@@ -1265,6 +1279,68 @@ test_pr_flow() {
     fail "PR body should include the Dependabot compatibility badge"
   [[ "$(cat "$pr_log")" == *"<sub>Findings and PR created by [actions-snitch](https://github.com/wallentx/actions-snitch).</sub>"* ]] ||
     fail "PR body should include the actions-snitch footer"
+}
+
+test_pr_targets_push_repository() {
+  local mode case_dir repo origin pr_log
+  local -a output_args
+  for mode in text json; do
+    case_dir="$TMP_ROOT/pr-fork-$mode"
+    repo="$case_dir/repo"
+    origin="$case_dir/fork.git"
+    pr_log="$case_dir/pr.log"
+    mkdir -p "$repo"
+    write_stubs "$case_dir/bin" 90 "$pr_log"
+    init_workflow_repo "$repo"
+    git -C "$repo" branch -m dev
+    git init --bare -q "$origin"
+    # Fetch from upstream, push to our fork. Metadata must use the push URL.
+    git -C "$repo" remote add origin https://github.com/upstream/fixture.git
+    git -C "$repo" remote set-url --push origin "$origin"
+    git -C "$repo" push -q -u origin dev
+    output_args=()
+    if [[ "$mode" == json ]]; then output_args=(-o json); fi
+    (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+      TEST_PR_ORIGIN="$origin" TEST_PR_BASE=dev TEST_PR_REPO_URL=https://github.com/fork-owner/fixture \
+      GH_REPO=upstream/fixture "$SCRIPT" -p -b actions-update "${output_args[@]}" > "$case_dir/output")
+    if [[ "$mode" == json ]]; then jq -e 'type == "object"' "$case_dir/output" >/dev/null; fi
+    [[ "$(cat "$pr_log")" == *"--repo https://github.com/fork-owner/fixture"* ]] ||
+      fail "PR must target the push repository even when GH_REPO points upstream ($mode)"
+    [[ "$(cat "$pr_log")" == *"--head actions-update --base dev"* ]] ||
+      fail "PR must target the fork's default branch ($mode)"
+    git --git-dir="$origin" show-ref --verify --quiet refs/heads/actions-update ||
+      fail "update branch must be pushed to the fork ($mode)"
+  done
+}
+
+test_pr_target_failure_precedes_changes() {
+  local variant case_dir repo before output metadata_failure base
+  for variant in missing-origin metadata-error missing-base; do
+    case_dir="$TMP_ROOT/pr-target-$variant"
+    repo="$case_dir/repo"
+    mkdir -p "$repo"
+    write_stubs "$case_dir/bin" 90 "$case_dir/pr.log"
+    init_workflow_repo "$repo"
+    before=$(git -C "$repo" rev-parse HEAD)
+    if [[ "$variant" != missing-origin ]]; then
+      git -C "$repo" remote add origin https://github.com/fork-owner/fixture.git
+    fi
+    metadata_failure=false
+    base=main
+    case "$variant" in
+      metadata-error) metadata_failure=true ;;
+      missing-base) base="" ;;
+    esac
+    if output=$(cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+      TEST_PR_METADATA_FAILURE="$metadata_failure" TEST_PR_BASE="$base" "$SCRIPT" -p -b actions-update 2>&1); then
+      fail "PR target resolution should fail for $variant"
+    fi
+    [[ "$output" == *"Error:"* ]] || fail "PR target failure should explain the error"
+    [[ "$(git -C "$repo" rev-parse HEAD)" == "$before" ]] || fail "target failure must not commit"
+    [[ "$(git -C "$repo" branch --show-current)" == main ]] || fail "target failure must not switch branches"
+    [[ -z "$(git -C "$repo" status --short)" ]] || fail "target failure must not modify workflows"
+    [[ ! -e "$case_dir/pr.log" ]] || fail "target failure must not create a PR"
+  done
 }
 
 test_pr_body_multiple_updates() {
@@ -1772,6 +1848,8 @@ test_commit_sha_default_branch_finding_has_no_release_notes_url
 test_commit_sha_release_uses_tag_ref_for_commit_lookup
 test_output_format_validation
 test_pr_flow
+test_pr_targets_push_repository
+test_pr_target_failure_precedes_changes
 test_pr_body_multiple_updates
 test_pr_flow_continues_after_non_semver_latest_release
 test_pr_flow_commits_two_updates_before_non_semver_latest_release

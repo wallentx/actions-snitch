@@ -212,10 +212,10 @@ configure() (
     # Serialize user strings instead of interpolating them into YAML.
     config=$(jq -n --argjson enabled "$enabled" --arg model "$model" \
         --argjson threshold "$((10#$threshold))" --arg issue_search "$issue_search" \
-        --arg api_key_env "$api_key_env" '{ai: {
+        --arg api_key_env "$api_key_env" '{ai: ({
             enabled: $enabled, backend: "llm", model: $model,
             threshold: $threshold, issue_search: $issue_search
-        } | if $api_key_env == "" then . else . + {api_key_env: $api_key_env} end}') || return 1
+        } | if $api_key_env == "" then . else . + {api_key_env: $api_key_env} end)}') || return 1
     config=$(printf '%s\n' "$config" | yq -P '.') || return 1
 
     umask 077
@@ -226,6 +226,7 @@ configure() (
         return 1
     fi
     printf 'Created %s\n' "$ACTIONS_SNITCH_CONFIG_FILE" >&2
+    return 0
 )
 
 # Parse flags
@@ -233,6 +234,8 @@ UPDATE=false
 CONFIGURE=false
 FORCE=false
 PUSH_PR=false
+PR_REPO_URL=""
+PR_BASE_BRANCH=""
 TARGET_BRANCH=""
 OUTPUT_FORMAT=""
 VERIFIED_CREATORS_ONLY=false
@@ -993,9 +996,28 @@ prompt_for_pr_branch() {
     TARGET_BRANCH="${branch:-$default_branch}"
 }
 
+resolve_pr_target() {
+    local push_url metadata
+
+    if ! push_url=$(git remote get-url --push origin 2>/dev/null) || [[ -z "$push_url" ]]; then
+        msg "error" "Error: -p requires an origin push URL to select the PR repository." >&2
+        return 1
+    fi
+    if ! metadata=$(gh repo view "$push_url" --json url,defaultBranchRef); then
+        msg "error" "Error: unable to resolve the PR repository from origin's push URL." >&2
+        return 1
+    fi
+    if ! PR_REPO_URL=$(jq -er '.url | select(type == "string" and length > 0)' <<< "$metadata") ||
+       ! PR_BASE_BRANCH=$(jq -er '.defaultBranchRef.name | select(type == "string" and length > 0)' <<< "$metadata"); then
+        msg "error" "Error: origin's repository must have a URL and a default branch for PR creation." >&2
+        return 1
+    fi
+}
+
 prepare_git_mode() {
     if $PUSH_PR; then
         ensure_clean_worktree "Error: -p requires a clean worktree before actions-snitch modifies workflows."
+        resolve_pr_target
         prompt_for_pr_branch
     fi
 
@@ -1931,17 +1953,17 @@ commit_push_pr() {
     if structured_output; then
         git commit -m "$title" >&2
         git push -u origin "$branch" >&2
-        gh pr create --title "$title" \
+        gh pr create --repo "$PR_REPO_URL" --title "$title" \
                      --body "$pr_body" \
                      --head "$branch" \
-                     --base "main" >&2
+                     --base "$PR_BASE_BRANCH" >&2
     else
         git commit -m "$title"
         git push -u origin "$branch"
-        gh pr create --title "$title" \
+        gh pr create --repo "$PR_REPO_URL" --title "$title" \
                      --body "$pr_body" \
                      --head "$branch" \
-                     --base "main"
+                     --base "$PR_BASE_BRANCH"
     fi
 }
 

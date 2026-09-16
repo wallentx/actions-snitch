@@ -120,6 +120,8 @@ The `llm` request uses `--no-log`, so workflow evidence is not written to its lo
 
 ### Pull Request Body
 
+With `-p`, actions-snitch pushes to `origin` and opens the PR in the repository selected by `origin`'s push URL, targeting that repository's default branch. When `origin` pushes to your fork, the PR stays in your fork instead of GitHub CLI's inferred upstream repository. The destination is checked before any branch or workflow changes.
+
 PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count. AI-approved updates or updates forced after an AI assessment also include the model's validated compatibility investigation; successfully applied input remediations are listed in that same collapsible section.
 
 ## How It Works
