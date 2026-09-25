@@ -44,10 +44,11 @@ msg() {
 
 # Function to display usage
 usage() {
-    msg "header" "Usage: actions-snitch [-c] [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"
+    msg "header" "Usage: actions-snitch [-c] [-u] [-s] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"
     msg "help" "Options:"
     msg "success" "  -c    Interactively create the config file, then exit (use alone)"
     msg "success" "  -u    Update outdated actions in-place"
+    msg "success" "  -s    Pin updates to full commit SHAs (scan without -u to preview)"
     msg "success" "  -f    Force updates regardless of compatibility score (requires -u or -p)"
     msg "success" "  -p    Commit, push, and create a pull request after updating actions (implies -u)"
     msg "success" "  -b    Branch to update or create before applying changes (requires -u or -p)"
@@ -231,6 +232,7 @@ configure() (
 
 # Parse flags
 UPDATE=false
+PIN_SHA=false
 CONFIGURE=false
 FORCE=false
 PUSH_PR=false
@@ -249,10 +251,11 @@ LOW_SCORE_THRESHOLD=80
 AI_ISSUE_SEARCH=auto
 AI_API_KEY_ENV=""
 
-while getopts ":cufpb:o:thv" opt; do
+while getopts ":cusfpb:o:thv" opt; do
   case $opt in
     c) CONFIGURE=true ;;
     u) UPDATE=true ;;
+    s) PIN_SHA=true ;;
     f) FORCE=true ;;
     p) PUSH_PR=true ;;
     b) TARGET_BRANCH="$OPTARG" ;;
@@ -490,15 +493,18 @@ set_cached_value() {
 cached_gh_api() {
     local endpoint="$1"
     local jq_query="$2"
+    shift 2
+    local -a query_args=()
+    if [[ -n "$jq_query" ]]; then query_args=(--jq "$jq_query"); fi
     local cache_key
-    cache_key=$(get_cache_key "gh_api:$endpoint:$jq_query")
+    cache_key=$(get_cache_key "gh_api:$endpoint:$jq_query${*:+:$*}")
     
     if cached_value=$(get_cached_value "$cache_key") && [[ -n "$cached_value" && "$cached_value" != "null" ]]; then
         echo "$cached_value"
         return 0
     fi
     
-    if ! result=$(gh api "$endpoint" --jq "$jq_query" 2>/dev/null); then
+    if ! result=$(gh api "$endpoint" "$@" "${query_args[@]}" 2>/dev/null); then
         $VERBOSE && msg "error" "  Failed to fetch data from GitHub API: $endpoint" >&2
         return 1
     fi
@@ -658,7 +664,7 @@ release_notes_url() {
     local repo="$1"
     local latest_version="$2"
 
-    if [[ -z "$(version_number_prefix "$latest_version")" ]]; then
+    if [[ "$latest_version" =~ ^[0-9a-fA-F]{40}$ || -z "$(version_number_prefix "$latest_version")" ]]; then
         return 1
     fi
 
@@ -730,6 +736,7 @@ json_finding() {
     local compatibility_score="$7"
     local verified_creator="$8"
     local release_notes="$9"
+    local current_tag="${10:-}" latest_sha="${11:-}" commits_since="${12:-}" update_ref="${13:-}"
     local -a compatibility_args
     local -a release_notes_args
 
@@ -754,6 +761,10 @@ json_finding() {
        --arg repository "$repo" \
        --arg current "$current_version" \
        --arg latest "$latest_version" \
+       --arg current_tag "$current_tag" \
+       --arg latest_sha "$latest_sha" \
+       --arg commits_since "$commits_since" \
+       --arg update_ref "$update_ref" \
        "${compatibility_args[@]}" \
        --argjson verified_creator "$verified_creator" \
        "${release_notes_args[@]}" \
@@ -764,6 +775,10 @@ json_finding() {
           repository: $repository,
           current: $current,
           latest: $latest,
+          current_tag: (if $current_tag == "" then null else $current_tag end),
+          latest_sha: (if $latest_sha == "" then null else $latest_sha end),
+          commits_since: (if $commits_since == "" then null else ($commits_since | tonumber) end),
+          update_ref: $update_ref,
           compatibility_score: $compatibility_score,
           verified_creator: $verified_creator,
           release_notes: $release_notes
@@ -832,29 +847,30 @@ record_finding() {
     local compatibility_score="$7"
     local verified_creator="$8"
     local release_notes=""
+    local current_tag="${9:-}" latest_sha="${10:-}" commits_since="${11:-}" update_ref="${12:-}"
 
     if ! release_notes=$(release_notes_url "$repo" "$latest_version"); then
         release_notes=""
     fi
 
-    FINDINGS+=("${file}${FINDING_SEP}${line_number}${FINDING_SEP}${action}${FINDING_SEP}${repo}${FINDING_SEP}${current_version}${FINDING_SEP}${latest_version}${FINDING_SEP}${compatibility_score}${FINDING_SEP}${verified_creator}${FINDING_SEP}${release_notes}")
+    FINDINGS+=("${file}${FINDING_SEP}${line_number}${FINDING_SEP}${action}${FINDING_SEP}${repo}${FINDING_SEP}${current_version}${FINDING_SEP}${latest_version}${FINDING_SEP}${compatibility_score}${FINDING_SEP}${verified_creator}${FINDING_SEP}${release_notes}${FINDING_SEP}${current_tag}${FINDING_SEP}${latest_sha}${FINDING_SEP}${commits_since}${FINDING_SEP}${update_ref}")
 }
 
 render_json_report() {
-    local finding file line_number action repo current_version latest_version compatibility_score verified_creator release_notes
+    local finding file line_number action repo current_version latest_version compatibility_score verified_creator release_notes current_tag latest_sha commits_since update_ref
 
     if (( ${#FINDINGS[@]} == 0 )); then
         return
     fi
 
     for finding in "${FINDINGS[@]}"; do
-        IFS="$FINDING_SEP" read -r file line_number action repo current_version latest_version compatibility_score verified_creator release_notes <<< "$finding"
-        json_finding "$file" "$line_number" "$action" "$repo" "$current_version" "$latest_version" "$compatibility_score" "$verified_creator" "$release_notes"
+        IFS="$FINDING_SEP" read -r file line_number action repo current_version latest_version compatibility_score verified_creator release_notes current_tag latest_sha commits_since update_ref <<< "$finding"
+        json_finding "$file" "$line_number" "$action" "$repo" "$current_version" "$latest_version" "$compatibility_score" "$verified_creator" "$release_notes" "$current_tag" "$latest_sha" "$commits_since" "$update_ref"
     done | jq -s --arg repo "$SCAN_REPO_NAME" '{($repo): .}'
 }
 
 render_markdown_report() {
-    local finding file line_number action repo current_version latest_version compatibility_score verified_creator release_notes compatibility_display action_display
+    local finding file line_number action repo current_version latest_version compatibility_score verified_creator release_notes current_tag latest_sha commits_since update_ref compatibility_display action_display
 
     if (( ${#FINDINGS[@]} == 0 )); then
         return
@@ -865,11 +881,11 @@ render_markdown_report() {
     else
         printf "## %s\n\n" "$SCAN_REPO_NAME"
     fi
-    printf "| File | Line | Action | Current | Latest | Compatibility | Release Notes |\n"
-    printf "| --- | ---: | --- | --- | --- | ---: | --- |\n"
+    printf "| File | Line | Action | Current | Latest | Compatibility | Release Notes | Current SHA tag | Latest SHA | Commits since | Update ref |\n"
+    printf "| --- | ---: | --- | --- | --- | ---: | --- | --- | --- | ---: | --- |\n"
 
     for finding in "${FINDINGS[@]}"; do
-        IFS="$FINDING_SEP" read -r file line_number action repo current_version latest_version compatibility_score verified_creator release_notes <<< "$finding"
+        IFS="$FINDING_SEP" read -r file line_number action repo current_version latest_version compatibility_score verified_creator release_notes current_tag latest_sha commits_since update_ref <<< "$finding"
         if [[ "$compatibility_score" =~ ^[0-9]+$ ]]; then
             compatibility_display="${compatibility_score}%"
         elif [[ -n "$compatibility_score" ]]; then
@@ -879,19 +895,23 @@ render_markdown_report() {
         fi
         action_display=$(verified_label "$action" "$verified_creator")
 
-        printf "| %s | %s | %s | %s | %s | %s | %s |\n" \
+        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
             "$(markdown_escape "$file")" \
             "$(markdown_escape "$line_number")" \
             "$(markdown_escape "$action_display")" \
             "$(markdown_escape "$current_version")" \
             "$(markdown_escape "$latest_version")" \
             "$(markdown_escape "$compatibility_display")" \
-            "$(markdown_escape "$release_notes")"
+            "$(markdown_escape "$release_notes")" \
+            "$(markdown_escape "$current_tag")" \
+            "$(markdown_escape "$latest_sha")" \
+            "$(markdown_escape "$commits_since")" \
+            "$(markdown_escape "$update_ref")"
     done
 }
 
 render_yaml_report() {
-    local finding file line_number action repo current_version latest_version compatibility_score verified_creator release_notes
+    local finding file line_number action repo current_version latest_version compatibility_score verified_creator release_notes current_tag latest_sha commits_since update_ref
 
     if (( ${#FINDINGS[@]} == 0 )); then
         return
@@ -900,13 +920,17 @@ render_yaml_report() {
     printf "%s:\n" "$(yaml_key "$SCAN_REPO_NAME")"
 
     for finding in "${FINDINGS[@]}"; do
-        IFS="$FINDING_SEP" read -r file line_number action repo current_version latest_version compatibility_score verified_creator release_notes <<< "$finding"
+        IFS="$FINDING_SEP" read -r file line_number action repo current_version latest_version compatibility_score verified_creator release_notes current_tag latest_sha commits_since update_ref <<< "$finding"
         printf "  - file: %s\n" "$(yaml_quote "$file")"
         printf "    line: %s\n" "$line_number"
         printf "    action: %s\n" "$(yaml_quote "$action")"
         printf "    repository: %s\n" "$(yaml_quote "$repo")"
         printf "    current: %s\n" "$(yaml_quote "$current_version")"
         printf "    latest: %s\n" "$(yaml_quote "$latest_version")"
+        printf "    current_tag: %s\n" "$(if [[ -n "$current_tag" ]]; then yaml_quote "$current_tag"; else printf null; fi)"
+        printf "    latest_sha: %s\n" "$(if [[ -n "$latest_sha" ]]; then yaml_quote "$latest_sha"; else printf null; fi)"
+        printf "    commits_since: %s\n" "$(yaml_scalar "$commits_since")"
+        printf "    update_ref: %s\n" "$(yaml_quote "$update_ref")"
         printf "    compatibility_score: %s\n" "$(yaml_scalar "$compatibility_score")"
         printf "    verified_creator: %s\n" "$verified_creator"
         printf "    release_notes: %s\n" "$(yaml_scalar "$release_notes")"
@@ -1031,6 +1055,7 @@ update_action_ref() {
     local action_path="$2"
     local current_version="$3"
     local latest_version="$4"
+    local target_ref="${5:-$(github_version_ref "$latest_version")}"
     local count index
 
     count=$(AI_ACTION_PATH="$action_path" AI_CURRENT_VERSION="$current_version" yq -r '
@@ -1040,19 +1065,19 @@ update_action_ref() {
                (.uses | split("@")[1] | sub("^v"; "")) == strenv(AI_CURRENT_VERSION))] | length
     ' "$file") || return 1
     (( count > 0 )) || return 0
-    AI_ACTION_PATH="$action_path" AI_CURRENT_VERSION="$current_version" AI_LATEST_VERSION="$latest_version" yq -i '
+    AI_ACTION_PATH="$action_path" AI_CURRENT_VERSION="$current_version" AI_LATEST_VERSION="$target_ref" yq -i '
         (.. | select(tag == "!!map" and has("uses")) |
         select((.uses | tag) == "!!str") |
         select((.uses | split("@")[0]) == strenv(AI_ACTION_PATH) and
                (.uses | split("@")[1] | sub("^v"; "")) == strenv(AI_CURRENT_VERSION))).uses =
-            (strenv(AI_ACTION_PATH) + "@v" + strenv(AI_LATEST_VERSION))
+            (strenv(AI_ACTION_PATH) + "@" + strenv(AI_LATEST_VERSION))
     ' "$file" || return 1
     UPDATE_COUNT=$((UPDATE_COUNT + count))
     for ((index = 0; index < count; index++)); do
         UPDATED_ACTIONS+=("$action_path|$current_version|$latest_version|$file")
     done
     if ! structured_output; then
-        msg "success" "      Updated $action_path from $current_version to $latest_version"
+        msg "success" "      Updated $action_path from $current_version to $target_ref"
     fi
 }
 
@@ -1065,7 +1090,7 @@ github_repo_url() {
 github_version_ref() {
     local version="$1"
 
-    if [[ "$version" == v* ]]; then
+    if [[ "$version" == v* || "$version" =~ ^[0-9a-fA-F]{40}$ || ! "$version" =~ ^[0-9] ]]; then
         printf "%s" "$version"
     else
         printf "v%s" "$version"
@@ -1881,6 +1906,20 @@ build_update_link_list() {
     done < <(build_pr_update_lines)
 }
 
+print_pr_pin_details() {
+    local action_path="$1" current="$2" latest="$3"
+    local finding file line action repo from to score _verified _notes tag sha count ref
+    for finding in "${FINDINGS[@]}"; do
+        IFS="$FINDING_SEP" read -r file line action repo from to score _verified _notes tag sha count ref <<< "$finding"
+        if [[ "${action%@*}" == "$action_path" && "$from" == "$current" && "$to" == "$latest" && -n "$sha" ]]; then
+            if [[ -n "$tag" ]]; then printf "Current SHA matches tag: \`%s\`.\n\n" "$tag"; fi
+            if [[ -n "$count" ]]; then printf 'Commits since current SHA: %s.\n\n' "$count"; fi
+            printf "Pinned update: \`%s@%s\`.\n\n" "$action_path" "$ref"
+            return
+        fi
+    done
+}
+
 build_pr_body() {
     local repo action_path current_version latest_version entry_count
     local count update_word
@@ -1902,6 +1941,7 @@ build_pr_body() {
         else
             printf "Updates \`%s\` from %s to %s across %d workflow entries.\n\n" "$action_path" "$current_version" "$latest_version" "$entry_count"
         fi
+        print_pr_pin_details "$action_path" "$current_version" "$latest_version"
         print_ai_assessment_section "$action_path" "$current_version" "$latest_version"
         print_release_notes_section "$repo" "$current_version" "$latest_version"
         print_changelog_section "$repo"
@@ -1967,6 +2007,49 @@ commit_push_pr() {
     fi
 }
 
+resolve_commit_sha() {
+    local sha
+    sha=$(cached_gh_api "repos/$1/commits/$2" '.sha') || return 1
+    [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+    printf '%s' "$sha" | tr '[:upper:]' '[:lower:]'
+}
+
+# Tags API returns commit identities for both lightweight and annotated tags.
+# Prefer the earliest full stable version over moving major/minor aliases.
+tag_for_sha() {
+    local tags
+    tags=$(cached_gh_api "repos/$1/tags?per_page=100" "" --paginate --slurp) || return 1
+    jq -er --arg sha "$2" '
+        if type != "array" or any(.[]; type != "array") then error("invalid tags") else . end |
+        [ .[][] | select((.commit.sha | ascii_downcase) == ($sha | ascii_downcase)) | .name ] |
+        sort_by(if test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$") then
+            [0, (ltrimstr("v") | split(".") | map(tonumber))]
+            else [1, .] end) | .[0] // ""
+    ' <<< "$tags"
+}
+
+# Root-relative Bash globs; trailing / includes descendants. Last match wins.
+# Deliberately independent of .gitignore: checked-in workflows may be ignored by git.
+snitch_ignored() {
+    local file="$1" pattern ignored=false include=false
+    [[ -f .snitchignore ]] || return 1
+    while IFS= read -r pattern || [[ -n "$pattern" ]]; do
+        pattern=${pattern%$'\r'}
+        [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+        include=false
+        if [[ "$pattern" == \!* ]]; then include=true; pattern=${pattern#?}; fi
+        pattern=${pattern#./}
+        pattern=${pattern#/}
+        [[ -z "$pattern" ]] && continue
+        if [[ "$pattern" == */ ]]; then pattern="${pattern}*"; fi
+        # shellcheck disable=SC2053 # Patterns intentionally use Bash glob matching.
+        if [[ "$file" == $pattern ]]; then
+            if $include; then ignored=false; else ignored=true; fi
+        fi
+    done < .snitchignore
+    $ignored
+}
+
 # Main scanning logic
 find_action_files() {
     {
@@ -1977,7 +2060,9 @@ find_action_files() {
         find . \
             \( -type d \( -name '.git' -o -name 'node_modules' \) -prune \) -o \
             \( -type f \( -name 'action.yml' -o -name 'action.yaml' \) -print \)
-    } | sed 's|^\./||' | sort -u
+    } | sed 's|^\./||' | sort -u | while IFS= read -r file; do
+        if ! snitch_ignored "$file"; then printf '%s\n' "$file"; fi
+    done
 }
 
 scan_files() {
@@ -2034,72 +2119,80 @@ scan_files() {
                  continue
             fi
 
-            # Handle commit SHAs
-            if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then
-                if ! latest_sha=$(cached_gh_api "repos/${repo}/commits/${latest_ref}" '.sha'); then
-                     ! structured_output && $VERBOSE && msg "warning" "  Unable to determine SHA for $repo version $latest_version" >&2
-                     continue
+            current_tag=""
+            latest_sha=""
+            commits_since=""
+            comparison_status=""
+            target_ref="$latest_ref"
+            needs_update=false
+            is_sha=false
+            [[ "$current_version" =~ ^[0-9a-fA-F]{40}$ ]] && is_sha=true
+
+            if $is_sha; then
+                if ! latest_sha=$(resolve_commit_sha "$repo" "$latest_ref"); then
+                    msg "warning" "Unable to resolve $repo@$latest_ref to a commit; skipping." >&2
+                    continue
                 fi
-
-                # Cache the commit diff calculation
-                commit_diff_cache_key=$(get_cache_key "commit_diff:${repo}:${current_version}:${latest_sha}")
-                if ! commit_diff=$(get_cached_value "$commit_diff_cache_key"); then
-                    temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/actions-snitch.XXXXXXXXXX")
-                    git clone --depth=1 "https://github.com/${repo}.git" "$temp_dir" >/dev/null 2>&1
-
-                    if ! commit_diff=$(
-                        cd "$temp_dir" &&
-                        git fetch origin "$current_version" >/dev/null 2>&1 &&
-                        git rev-list --count "${current_version}..${latest_sha}" 2>/dev/null
-                    ); then
-                        commit_diff=0
+                if [[ "$(printf "%s" "$current_version" | tr '[:upper:]' '[:lower:]')" == "$latest_sha" ]]; then
+                    ! structured_output && $VERBOSE && msg "success" "  $repo is up-to-date ($current_version)"
+                    continue
+                fi
+                if ! comparison=$(cached_gh_api "repos/${repo}/compare/${current_version}...${latest_sha}" '{status, ahead_by, behind_by}'); then
+                    msg "warning" "Unable to compare $repo@$current_version with $latest_sha; skipping." >&2
+                    continue
+                fi
+                if ! comparison_status=$(jq -er '.status | select(. == "ahead" or . == "behind" or . == "identical" or . == "diverged")' <<< "$comparison"); then
+                    msg "warning" "Invalid comparison for $repo; skipping." >&2
+                    continue
+                fi
+                if [[ "$comparison_status" != ahead ]]; then
+                    msg "warning" "Skipping $repo: latest target is $comparison_status relative to the current SHA." >&2
+                    continue
+                fi
+                if ! commits_since=$(jq -er '.ahead_by | select(type == "number" and . > 0 and floor == .)' <<< "$comparison"); then
+                    msg "warning" "Missing commit count for $repo; skipping." >&2
+                    continue
+                fi
+                if ! current_tag=$(tag_for_sha "$repo" "$current_version"); then
+                    msg "warning" "Unable to look up tags for $repo@$current_version; showing commit distance only." >&2
+                    current_tag=""
+                fi
+                target_ref="$latest_sha"
+                needs_update=true
+            else
+                current_major_minor_patch=$(version_number_prefix "$current_version")
+                latest_major_minor_patch=$(version_number_prefix "$latest_version")
+                # Without -s retain the existing major-tag update policy.
+                if [[ "$current_version" =~ ^[0-9]+$ ]] && ! $PIN_SHA; then
+                    current_major=$(version_major "$current_version")
+                    latest_major=$(version_major "$latest_version")
+                    [[ -z "$latest_major" || "$current_major" == "$latest_major" ]] && continue
+                    latest_version="$latest_major"
+                    target_ref="${latest_ref%%[0-9]*}${latest_major}"
+                fi
+                if [[ -n "$current_major_minor_patch" && "$current_major_minor_patch" != "$latest_major_minor_patch" ]]; then
+                    needs_update=true
+                fi
+                # -s also pins already-current release tags.
+                if $PIN_SHA && [[ -n "$current_major_minor_patch" && -n "$latest_major_minor_patch" ]]; then
+                    if ! latest_sha=$(resolve_commit_sha "$repo" "$latest_ref"); then
+                        msg "warning" "Unable to resolve $repo@$latest_ref to a commit; skipping." >&2
+                        continue
                     fi
-
-                    rm -rf "$temp_dir"
-                    set_cached_value "$commit_diff_cache_key" "$commit_diff"
+                    target_ref="$latest_sha"
+                    needs_update=true
                 fi
-
-                if [[ "$commit_diff" -gt 0 ]]; then
-                    VERIFIED_CREATOR=$(fetch_verified_creator "$repo")
-                    record_finding "$file" "$line_number" "$action" "$repo" "$current_version" "$latest_version" "" "$VERIFIED_CREATOR"
-
-                    if ! structured_output; then
-                        repo_display=$(verified_label "$repo" "$VERIFIED_CREATOR")
-
-                        if [[ "$file_header_printed" == "false" ]]; then
-                             msg "section" "Findings in $file:"
-                             file_header_printed=true
-                        fi
-                        echo "    ❗ $(msg "warning" "$repo_display is outdated (commit SHA):")"
-                        echo "      Line: $(msg "info" "$line_number")"
-                        echo "      Current: $(msg "warning" "$current_version")"
-                        echo "      Latest: $(msg "success" "$latest_version")"
-                        if release_notes=$(release_notes_url "$repo" "$latest_version"); then
-                            echo "      Release Notes: $(msg "code" "$release_notes")"
-                        fi
-                        echo ""
-                    fi
-                fi
-
-                continue
             fi
 
-            # Compare versions
-            current_major_minor_patch=$(version_number_prefix "$current_version")
-            latest_major_minor_patch=$(version_number_prefix "$latest_version")
-
-            # If only MAJOR is specified, compare MAJOR
-            if [[ "$current_version" =~ ^[0-9]+$ ]]; then
-                current_major=$(version_major "$current_version")
-                latest_major=$(version_major "$latest_version")
-                [[ -z "$latest_major" || "$current_major" == "$latest_major" ]] && continue
-                latest_version="$latest_major"
-            fi
-
-            if [[ -n "$current_major_minor_patch" && "$current_major_minor_patch" != "$latest_major_minor_patch" ]]; then
-                COMPAT_SCORE=$(fetch_compat_score "$repo" "$current_version" "$latest_version")
+            if $needs_update; then
+                COMPAT_SCORE="Unknown"
+                policy_current="${current_tag#v}"
+                if ! $is_sha; then policy_current="$current_version"; fi
+                if [[ -n "$policy_current" ]]; then
+                    COMPAT_SCORE=$(fetch_compat_score "$repo" "$policy_current" "$latest_version")
+                fi
                 VERIFIED_CREATOR=$(fetch_verified_creator "$repo")
-                record_finding "$file" "$line_number" "$action" "$repo" "$current_version" "$latest_version" "$COMPAT_SCORE" "$VERIFIED_CREATOR"
+                record_finding "$file" "$line_number" "$action" "$repo" "$current_version" "$latest_version" "$COMPAT_SCORE" "$VERIFIED_CREATOR" "$current_tag" "$latest_sha" "$commits_since" "$target_ref"
 
                 if ! structured_output; then
                     repo_display=$(verified_label "$repo" "$VERIFIED_CREATOR")
@@ -2111,10 +2204,22 @@ scan_files() {
 
                     badge=$(format_badge "$COMPAT_SCORE")
 
-                    echo "    ❗ $(msg "warning" "$repo_display is outdated:")"
+                    finding_kind="is outdated"
+                    if $PIN_SHA && ! $is_sha && [[ "$current_version" == "$latest_version" ]]; then
+                        finding_kind="can be pinned to a commit SHA"
+                    fi
+                    echo "    ❗ $(msg "warning" "$repo_display $finding_kind:")"
                     echo "      Line: $(msg "info" "$line_number")"
                     echo "      Current: $(msg "warning" "$current_version")"
+                    if [[ -n "$current_tag" ]]; then
+                        echo "      Current SHA matches tag: $(msg "info" "$current_tag")"
+                    elif $is_sha; then
+                        echo "      Commits since: $(msg "info" "$commits_since")"
+                    fi
                     echo "      Latest: $(msg "success" "$latest_version")"
+                    if [[ -n "$latest_sha" ]]; then
+                        echo "      Latest SHA: $(msg "success" "$latest_sha")"
+                    fi
                     echo -e "      $badge"
                     if release_notes=$(release_notes_url "$repo" "$latest_version"); then
                         echo "      Release Notes: $(msg "code" "$release_notes")"
@@ -2133,12 +2238,12 @@ scan_files() {
                             AI_DECISION=$(printf "%s" "$AI_ASSESSMENT_RESULT" | jq -r '.decision')
                             if [[ "$AI_DECISION" == "allow" ]]; then
                                 if apply_ai_remediations "$full_action_path" "$current_version" "$latest_version"; then
-                                    update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version"
+                                    update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version" "$target_ref"
                                 elif $FORCE; then
                                     if ! structured_output; then
                                         msg "warning" "      AI remediation could not be validated or applied; updating $repo because -f was used."
                                     fi
-                                    update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version"
+                                    update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version" "$target_ref"
                                 elif ! structured_output; then
                                     msg "warning" "      Skipping update of $repo because its AI remediation could not be safely validated and applied. Use -f to force."
                                 fi
@@ -2146,17 +2251,17 @@ scan_files() {
                                 if ! structured_output; then
                                     msg "warning" "      AI decision '$AI_DECISION' requires review; applying $repo because -f was used."
                                 fi
-                                update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version"
+                                update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version" "$target_ref"
                             elif ! structured_output; then
                                 msg "warning" "      Skipping update of $repo to v$latest_version after AI decision '$AI_DECISION'. Use -f to force."
                             fi
                         elif $FORCE; then
-                            update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version"
+                            update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version" "$target_ref"
                         elif ! structured_output; then
                             msg "warning" "      Skipping update of $repo to v$latest_version due to low compatibility score ($COMPAT_SCORE%). Enable AI analysis or use -f to force."
                         fi
                     else
-                        update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version"
+                        update_action_ref "$file" "$full_action_path" "$current_version" "$latest_version" "$target_ref"
                     fi
                 fi
             else
