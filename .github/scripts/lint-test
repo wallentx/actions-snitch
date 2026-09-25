@@ -1247,21 +1247,27 @@ test_sha_pin_option_and_policy() {
 
 test_sha_pin_non_semver_targets() {
   local case_dir="$TMP_ROOT/sha-pin-non-semver" bin_dir="$TMP_ROOT/sha-pin-non-semver/bin"
-  local repo="$case_dir/repo" variant mode output expected_latest cache before
+  local repo="$case_dir/repo" variant mode output expected_latest cache before current_ref
   local -a target_env resolve_env
   mkdir -p "$repo"
   write_sha_stubs "$bin_dir" 90
   init_workflow_repo "$repo"
-  for variant in default-branch non-semver-release; do
+  for variant in default-branch non-semver-release current-non-semver-release current-v-prefixed-release; do
+    current_ref=v2
     if [[ "$variant" == default-branch ]]; then
       target_env=(TEST_SHA_NO_RELEASE=true)
       expected_latest=main
+    elif [[ "$variant" == current-v-prefixed-release ]]; then
+      target_env=(TEST_SHA_RELEASE=vstable)
+      expected_latest=stable
+      current_ref=vstable
     else
       target_env=(TEST_SHA_RELEASE=release-stable)
       expected_latest=release-stable
+      if [[ "$variant" == current-non-semver-release ]]; then current_ref=release-stable; fi
     fi
     for mode in success api-failure invalid-sha; do
-      yq -i '.jobs.build.steps[0].uses = "actions/checkout@v2"' "$repo/.github/workflows/build.yml"
+      REF="$current_ref" yq -i '.jobs.build.steps[0].uses = "actions/checkout@" + strenv(REF)' "$repo/.github/workflows/build.yml"
       before=$(cat "$repo/.github/workflows/build.yml")
       cache="$case_dir/$variant-$mode"
       resolve_env=()
@@ -1269,6 +1275,13 @@ test_sha_pin_non_semver_targets() {
         api-failure) resolve_env=(TEST_SHA_RESOLVE_FAIL=true) ;;
         invalid-sha) resolve_env=(TEST_SHA_LATEST=main) ;;
       esac
+      if [[ "$mode" == success && "$variant" == current-* ]]; then
+        output=$(cd "$repo" && env "${target_env[@]}" PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$cache" "$SCRIPT" -u -o json)
+        [[ -z "$output" && "$(cat "$repo/.github/workflows/build.yml")" == "$before" ]] || fail "current non-semver tag must stay unchanged without -s"
+        output=$(cd "$repo" && env "${target_env[@]}" PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$cache" "$SCRIPT" -s -o json)
+        jq -e '.repo[0].update_ref == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' <<< "$output" >/dev/null || fail "-s must preview a pin for $variant"
+        [[ "$(cat "$repo/.github/workflows/build.yml")" == "$before" ]] || fail "-s preview must not modify $variant"
+      fi
       output=$(cd "$repo" && env "${target_env[@]}" "${resolve_env[@]}" PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$cache" "$SCRIPT" -u -s -o json 2>"$case_dir/error")
       if [[ "$mode" == success ]]; then
         [[ "$(yq '.jobs.build.steps[0].uses' "$repo/.github/workflows/build.yml")" == actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] || fail "-s must resolve $variant to a full SHA"
