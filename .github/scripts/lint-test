@@ -9,6 +9,10 @@ ROOT=$(git rev-parse --show-toplevel)
 SCRIPT="$ROOT/actions-snitch"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/actions-snitch-lint-test.XXXXXXXXXX")
 
+# Never load a developer's live AI configuration during fixture tests.
+unset ACTIONS_SNITCH_CONFIG ACTIONS_SNITCH_AI ACTIONS_SNITCH_AI_MODEL ACTIONS_SNITCH_AI_THRESHOLD
+export XDG_CONFIG_HOME="$TMP_ROOT/config"
+
 cleanup() {
   rm -rf "$TMP_ROOT"
 }
@@ -313,113 +317,75 @@ CURL
   chmod +x "$bindir/gh" "$bindir/curl"
 }
 
-write_commit_sha_default_branch_stubs() {
-  local bindir="$1"
-  local real_git
-
-  real_git=$(command -v git)
-  mkdir -p "$bindir"
-
+write_sha_stubs() {
+  local bindir="$1" score="${2:-90}" pr_log="${3:-}"
+  write_stubs "$bindir" "$score" "$pr_log"
+  mv "$bindir/gh" "$bindir/base-gh"
   cat > "$bindir/gh" <<'GH'
 #!/usr/bin/env bash
 set -euo pipefail
-
-if [[ "${1:-}" == "api" ]]; then
-  case "${2:-}" in
-    repos/actions/checkout/releases/latest)
-      exit 1
-      ;;
-    repos/actions/checkout)
-      printf 'main\n'
-      ;;
-    repos/actions/checkout/commits/main)
-      printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
-      ;;
-    *)
-      printf 'unexpected gh api endpoint: %s\n' "${2:-}" >&2
-      exit 1
-      ;;
+if [[ "${1:-}" != api ]]; then exec "$(dirname "$0")/base-gh" "$@"; fi
+endpoint="$2"
+shift 2
+query='.'
+query_given=false
+paginate=false
+slurp=false
+while (( $# )); do
+  case "$1" in
+    --jq) query="$2"; query_given=true; shift ;;
+    --paginate) paginate=true ;;
+    --slurp) slurp=true ;;
   esac
-else
-  printf 'unexpected gh args: %s\n' "$*" >&2
-  exit 1
-fi
-GH
-
-  cat > "$bindir/curl" <<'CURL'
-#!/usr/bin/env bash
-set -euo pipefail
-
-case "$*" in
-  *raw.githubusercontent.com/actions/checkout*/action.y*)
-    printf '%s\n' 'name: Checkout'
+  shift
+done
+if $slurp && $query_given; then exit 1; fi
+case "$endpoint" in
+  repos/actions/checkout/releases/latest)
+    [[ "${TEST_SHA_NO_RELEASE:-false}" != true ]] || exit 1
+    jq -n --arg tag "${TEST_SHA_RELEASE:-v7.0.1}" '{tag_name:$tag}' | jq -r "$query"
     ;;
-  *github.com/marketplace/actions/checkout*)
-    printf '%s\n' 'GitHub has manually verified the creator of the action as an official partner organization.'
+  repos/actions/checkout)
+    printf '{"default_branch":"main"}' | jq -r "$query"
     ;;
-  *)
-    printf 'unexpected curl args: %s\n' "$*" >&2
-    exit 1
+  repos/actions/checkout/commits/*)
+    expected_ref="${TEST_SHA_RELEASE:-v7.0.1}"
+    if [[ "${TEST_SHA_NO_RELEASE:-false}" == true ]]; then expected_ref=main; fi
+    [[ "$endpoint" == "repos/actions/checkout/commits/$expected_ref" ]] || exit 1
+    [[ "${TEST_SHA_RESOLVE_FAIL:-false}" != true ]] || exit 1
+    jq -n --arg sha "${TEST_SHA_LATEST:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" '{sha:$sha}' | jq -r "$query"
     ;;
+  repos/actions/checkout/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+    [[ "${TEST_SHA_COMPARE_FAIL:-false}" != true ]] || exit 1
+    jq -n --arg status "${TEST_SHA_STATUS:-ahead}" --argjson count "${TEST_SHA_COUNT:-302}" \
+      '{status:$status, ahead_by:$count, behind_by:0}' | jq -r "$query"
+    ;;
+  'repos/actions/checkout/tags?per_page=100')
+    $paginate && $slurp || { printf 'tags must fetch all pages\n' >&2; exit 1; }
+    [[ "${TEST_SHA_TAGS_FAIL:-false}" != true ]] || exit 1
+    if [[ "${TEST_SHA_NUMERIC_TAG:-false}" == true ]]; then
+      printf '[[{"name":"6","commit":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]]'
+    elif [[ "${TEST_SHA_UNTAGGED:-false}" == true ]]; then
+      printf '[[]]'
+    else
+      # Exact full tags live on page two; v6 is a moving alias on page one.
+      printf '[[{"name":"v6","commit":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}],'
+      printf '[{"name":"v6.2.0","commit":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},'
+      printf '{"name":"v6.1.0","commit":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]]'
+    fi
+    ;;
+  *) exec "$(dirname "$0")/base-gh" api "$endpoint" --jq "$query" ;;
 esac
-CURL
+GH
+  chmod +x "$bindir/gh"
+}
 
-  cat > "$bindir/git" <<GIT
-#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ "\${1:-}" == "clone" && "\${2:-}" == "--depth=1" && "\${3:-}" == "https://github.com/actions/checkout.git" ]]; then
-  mkdir -p "\$4"
-  exit 0
-fi
-
-if [[ "\${1:-}" == "fetch" && "\${2:-}" == "origin" ]]; then
-  exit 0
-fi
-
-if [[ "\${1:-}" == "rev-list" && "\${2:-}" == "--count" ]]; then
-  printf '1\n'
-  exit 0
-fi
-
-exec "$real_git" "\$@"
-GIT
-
-  chmod +x "$bindir/gh" "$bindir/curl" "$bindir/git"
+write_commit_sha_default_branch_stubs() {
+  write_sha_stubs "$1"
 }
 
 write_commit_sha_release_stubs() {
-  local bindir="$1"
-
-  write_commit_sha_default_branch_stubs "$bindir"
-
-  cat > "$bindir/gh" <<'GH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ "${1:-}" == "api" ]]; then
-  case "${2:-}" in
-    repos/actions/checkout/releases/latest)
-      printf 'v7.0.1\n'
-      ;;
-    repos/actions/checkout)
-      printf 'main\n'
-      ;;
-    repos/actions/checkout/commits/v7.0.1)
-      printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
-      ;;
-    *)
-      printf 'unexpected gh api endpoint: %s\n' "${2:-}" >&2
-      exit 1
-      ;;
-  esac
-else
-  printf 'unexpected gh args: %s\n' "$*" >&2
-  exit 1
-fi
-GH
-
-  chmod +x "$bindir/gh"
+  write_sha_stubs "$1"
 }
 
 write_null_release_body_stubs() {
@@ -717,10 +683,10 @@ test_option_validation() {
   local option_output="$TMP_ROOT/option-validation.out"
 
   output=$("$SCRIPT" -h)
-  [[ "$output" == *"Usage: actions-snitch [-c] [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
+  [[ "$output" == *"Usage: actions-snitch [-c] [-u] [-s] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
     fail "help output does not document the expected usage"
   output=$(TERM=dumb "$SCRIPT" -h)
-  [[ "$output" == *"Usage: actions-snitch [-c] [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
+  [[ "$output" == *"Usage: actions-snitch [-c] [-u] [-s] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]"* ]] ||
     fail "help output should work without color-capable terminal settings"
   [[ "$output" == *"  -o    Output findings as json, md, or yaml"* ]] ||
     fail "help output does not document the output option"
@@ -1182,7 +1148,7 @@ test_commit_sha_default_branch_finding_has_no_release_notes_url() {
   init_commit_sha_repo "$repo"
   repo_name=$(basename "$repo")
 
-  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
+  output=$(cd "$repo" && TEST_SHA_NO_RELEASE=true TEST_SHA_UNTAGGED=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
 
   [[ "$(jq -r --arg repo "$repo_name" '.[$repo][0].latest' <<< "$output")" == "main" ]] ||
     fail "commit SHA finding should report the default branch as latest"
@@ -1207,6 +1173,185 @@ test_commit_sha_release_uses_tag_ref_for_commit_lookup() {
 
   [[ "$(jq -r --arg repo "$repo_name" '.[$repo][0].latest' <<< "$output")" == "7.0.1" ]] ||
     fail "commit SHA finding should resolve the latest release through its v-prefixed tag"
+}
+
+test_sha_reporting_and_updates() {
+  local case_dir="$TMP_ROOT/sha-reporting" bin_dir="$TMP_ROOT/sha-reporting/bin"
+  local repo="$case_dir/repo" output format
+  mkdir -p "$repo"
+  write_sha_stubs "$bin_dir"
+  init_commit_sha_repo "$repo"
+  output=$(cd "$repo" && TERM=dumb PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -v)
+  [[ "$output" == *"Current SHA matches tag: v6.1.0"* ]] || fail "SHA should match earliest full tag across all pages"
+  [[ "$output" == *"Latest SHA: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"* ]] || fail "human findings need latest SHA"
+  output=$(cd "$repo" && TEST_SHA_NUMERIC_TAG=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/numeric" "$SCRIPT" -o yaml)
+  [[ "$(yq '.repo[0].current_tag | tag' <<< "$output")" == "!!str" ]] || fail "numeric tag names must remain YAML strings"
+  for format in json yaml md; do
+    output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o "$format")
+    [[ "$output" == *v6.1.0* && "$output" == *bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb* ]] || fail "$format should include SHA translation"
+    if [[ "$format" == json ]]; then
+      jq -e '.repo[0] | .current_tag == "v6.1.0" and .latest_sha == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and .commits_since == 302 and .update_ref == .latest_sha' <<< "$output" >/dev/null || fail "SHA structured metadata incorrect"
+    fi
+  done
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u >/dev/null)
+  [[ "$(yq '.jobs.build.steps[0].uses' "$repo/.github/workflows/build.yml")" == actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] || fail "SHA update must stay a bare SHA without -s"
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
+  [[ -z "$output" ]] || fail "same SHA as latest must produce no finding"
+}
+
+test_sha_untagged_and_failed_comparisons() {
+  local case_dir="$TMP_ROOT/sha-untagged" bin_dir="$TMP_ROOT/sha-untagged/bin"
+  local repo="$case_dir/repo" output status
+  mkdir -p "$repo"
+  write_sha_stubs "$bin_dir"
+  init_commit_sha_repo "$repo"
+  output=$(cd "$repo" && TERM=dumb TEST_SHA_UNTAGGED=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/untagged" "$SCRIPT" -v)
+  [[ "$output" == *"Commits since: 302"* && "$output" != *"Current SHA matches tag:"* ]] || fail "untagged SHA needs complete commit count, not a guessed tag"
+  for status in behind diverged identical; do
+    output=$(cd "$repo" && TEST_SHA_STATUS="$status" PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/$status" "$SCRIPT" -u -f -o json 2>"$case_dir/error")
+    [[ -z "$output" ]] || fail "$status must not be reported as outdated"
+    grep -q 'actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$repo/.github/workflows/build.yml" || fail "$status must not rewrite SHA"
+  done
+  output=$(cd "$repo" && TEST_SHA_COMPARE_FAIL=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/failed" "$SCRIPT" -u -o json 2>"$case_dir/error")
+  [[ -z "$output" ]] || fail "failed comparison must not invent a finding"
+  grep -q 'Unable to compare' "$case_dir/error" || fail "failed comparison must be visible"
+  output=$(cd "$repo" && TEST_SHA_TAGS_FAIL=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/tags-failed" "$SCRIPT" -o json 2>"$case_dir/error")
+  jq -e '.repo[0] | .current_tag == null and .commits_since == 302' <<< "$output" >/dev/null || fail "tag failure should retain proven commit distance"
+  grep -q 'Unable to look up tags' "$case_dir/error" || fail "tag lookup failure must not masquerade as no matching tags"
+}
+
+test_sha_pin_option_and_policy() {
+  local case_dir="$TMP_ROOT/sha-pin" bin_dir="$TMP_ROOT/sha-pin/bin"
+  local repo="$case_dir/repo" output ref
+  mkdir -p "$repo"
+  write_sha_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+  for ref in v2 v7 v7.0.1 7.0.1; do
+    REF="$ref" yq -i '.jobs.build.steps[0].uses = "actions/checkout@" + strenv(REF)' "$repo/.github/workflows/build.yml"
+    output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -s -o json)
+    jq -e '.repo[0].update_ref == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' <<< "$output" >/dev/null || fail "-s must preview pin for $ref"
+    [[ "$(yq '.jobs.build.steps[0].uses' "$repo/.github/workflows/build.yml")" == "actions/checkout@$ref" ]] || fail "-s alone must not mutate"
+    (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u -s >/dev/null)
+    [[ "$(yq '.jobs.build.steps[0].uses' "$repo/.github/workflows/build.yml")" == actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] || fail "-s must pin $ref"
+  done
+  yq -i '.jobs.build.steps[0].uses = "actions/checkout@v2"' "$repo/.github/workflows/build.yml"
+  (cd "$repo" && TEST_SHA_RESOLVE_FAIL=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/resolve-failed" "$SCRIPT" -u -s >/dev/null 2>&1)
+  grep -q 'actions/checkout@v2' "$repo/.github/workflows/build.yml" || fail "failed SHA resolution must not fall back to tag update"
+  write_sha_stubs "$bin_dir" 50
+  yq -i '.jobs.build.steps[0].uses = "actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$repo/.github/workflows/build.yml"
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/low" "$SCRIPT" -u >/dev/null)
+  grep -q 'actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$repo/.github/workflows/build.yml" || fail "SHA updates must respect compatibility gate"
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/low" "$SCRIPT" -u -f >/dev/null)
+  grep -q 'actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$repo/.github/workflows/build.yml" || fail "-f must allow low-score SHA update"
+}
+
+test_sha_pin_non_semver_targets() {
+  local case_dir="$TMP_ROOT/sha-pin-non-semver" bin_dir="$TMP_ROOT/sha-pin-non-semver/bin"
+  local repo="$case_dir/repo" variant mode output expected_latest cache before current_ref
+  local -a target_env resolve_env
+  mkdir -p "$repo"
+  write_sha_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+  for variant in default-branch non-semver-release current-non-semver-release current-v-prefixed-release; do
+    current_ref=v2
+    if [[ "$variant" == default-branch ]]; then
+      target_env=(TEST_SHA_NO_RELEASE=true)
+      expected_latest=main
+    elif [[ "$variant" == current-v-prefixed-release ]]; then
+      target_env=(TEST_SHA_RELEASE=vstable)
+      expected_latest=stable
+      current_ref=vstable
+    else
+      target_env=(TEST_SHA_RELEASE=release-stable)
+      expected_latest=release-stable
+      if [[ "$variant" == current-non-semver-release ]]; then current_ref=release-stable; fi
+    fi
+    for mode in success api-failure invalid-sha; do
+      REF="$current_ref" yq -i '.jobs.build.steps[0].uses = "actions/checkout@" + strenv(REF)' "$repo/.github/workflows/build.yml"
+      before=$(cat "$repo/.github/workflows/build.yml")
+      cache="$case_dir/$variant-$mode"
+      resolve_env=()
+      case "$mode" in
+        api-failure) resolve_env=(TEST_SHA_RESOLVE_FAIL=true) ;;
+        invalid-sha) resolve_env=(TEST_SHA_LATEST=main) ;;
+      esac
+      if [[ "$mode" == success && "$variant" == current-* ]]; then
+        output=$(cd "$repo" && env "${target_env[@]}" PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$cache" "$SCRIPT" -u -o json)
+        [[ -z "$output" && "$(cat "$repo/.github/workflows/build.yml")" == "$before" ]] || fail "current non-semver tag must stay unchanged without -s"
+        output=$(cd "$repo" && env "${target_env[@]}" PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$cache" "$SCRIPT" -s -o json)
+        jq -e '.repo[0].update_ref == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' <<< "$output" >/dev/null || fail "-s must preview a pin for $variant"
+        [[ "$(cat "$repo/.github/workflows/build.yml")" == "$before" ]] || fail "-s preview must not modify $variant"
+      fi
+      output=$(cd "$repo" && env "${target_env[@]}" "${resolve_env[@]}" PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$cache" "$SCRIPT" -u -s -o json 2>"$case_dir/error")
+      if [[ "$mode" == success ]]; then
+        [[ "$(yq '.jobs.build.steps[0].uses' "$repo/.github/workflows/build.yml")" == actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] || fail "-s must resolve $variant to a full SHA"
+        jq -e --arg latest "$expected_latest" '.repo[0] | .latest == $latest and .latest_sha == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and .update_ref == .latest_sha' <<< "$output" >/dev/null || fail "$variant report must identify the actual SHA target"
+      else
+        [[ "$(cat "$repo/.github/workflows/build.yml")" == "$before" ]] || fail "$variant $mode must leave the workflow unchanged"
+        [[ -z "$output" ]] || fail "$variant $mode must not propose a mutable ref"
+        grep -q 'Unable to resolve' "$case_dir/error" || fail "$variant $mode must report the resolution failure"
+      fi
+    done
+  done
+}
+
+test_sha_subpaths_and_default_branch() {
+  local case_dir="$TMP_ROOT/sha-subpaths" bin_dir="$TMP_ROOT/sha-subpaths/bin"
+  local repo="$case_dir/repo" output
+  mkdir -p "$repo/.github/actions/helper"
+  write_sha_stubs "$bin_dir"
+  init_commit_sha_repo "$repo"
+  cat > "$repo/.github/actions/helper/action.yml" <<'YAML'
+name: Helper
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout/helper@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      with:
+        token: example
+YAML
+  (cd "$repo" && TEST_SHA_NO_RELEASE=true TEST_SHA_UNTAGGED=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u >/dev/null)
+  [[ "$(yq '.runs.steps[0].uses' "$repo/.github/actions/helper/action.yml")" == actions/checkout/helper@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] || fail "default branch SHA update must preserve action subpath"
+  [[ "$(yq '.runs.steps[0].with.token' "$repo/.github/actions/helper/action.yml")" == example ]] || fail "SHA update must preserve inputs"
+  output=$(cd "$repo" && TEST_SHA_NO_RELEASE=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
+  [[ -z "$output" ]] || fail "default branch pins must be idempotent"
+}
+
+test_sha_pr_flow() {
+  local case_dir="$TMP_ROOT/sha-pr" bin_dir="$TMP_ROOT/sha-pr/bin"
+  local repo="$case_dir/repo" origin="$case_dir/origin.git" body
+  mkdir -p "$repo"
+  write_sha_stubs "$bin_dir" 90 "$case_dir/pr.log"
+  init_commit_sha_repo "$repo"
+  git init --bare -q "$origin"
+  git -C "$repo" remote add origin "$origin"
+  git -C "$repo" push -q -u origin main
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -p -b actions-update >/dev/null)
+  body=$(cat "$case_dir/pr.log")
+  [[ "$body" == *"Current SHA matches tag: \`v6.1.0\`"* ]] || fail "PR must translate current SHA"
+  [[ "$body" == *'actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'* ]] || fail "PR must show exact updated pin"
+  [[ "$body" != *vaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa* ]] || fail "PR links must not prepend v to SHA"
+  [[ -z "$(git -C "$repo" status --short)" ]] || fail "SHA PR should commit all updates"
+}
+
+test_snitchignore() {
+  local case_dir="$TMP_ROOT/snitchignore" bin_dir="$TMP_ROOT/snitchignore/bin"
+  local repo="$case_dir/repo" output
+  mkdir -p "$repo"
+  write_stubs "$bin_dir" 90
+  init_yaml_and_composite_repo "$repo"
+  mkdir -p "$repo/.test/clone/.github/actions/sample" "$repo/fixtures with spaces"
+  cp "$repo/.github/actions/helper/action.yml" "$repo/.test/clone/.github/actions/sample/action.yml"
+  cp "$repo/.github/actions/helper/action.yml" "$repo/fixtures with spaces/action.yaml"
+  # CRLF, comments, a final line without newline, glob, directory and negation.
+  printf '# fixtures\r\n.test/\r\nfixtures with spaces/\r\n.github/workflows/*.yaml\n.github/actions/\n!.github/actions/helper/action.yml' > "$repo/.snitchignore"
+  output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
+  jq -e '.repo | length == 1 and .[0].file == ".github/actions/helper/action.yml"' <<< "$output" >/dev/null || fail "ignore must filter workflows and nested fixtures, respecting negation"
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u >/dev/null)
+  grep -q 'actions/cache@v5' "$repo/.test/clone/.github/actions/sample/action.yml" || fail "ignored fixtures must not be updated"
+  grep -q 'actions/cache@v5' "$repo/fixtures with spaces/action.yaml" || fail "ignored paths with spaces must not be updated"
+  grep -q 'actions/checkout@v2' "$repo/.github/workflows/build.yaml" || fail "ignored workflows must not be updated"
+  grep -q 'actions/cache@v6' "$repo/.github/actions/helper/action.yml" || fail "re-included composite action must update"
 }
 
 test_output_format_validation() {
@@ -1846,6 +1991,13 @@ test_yaml_output_groups_findings_by_repo
 test_structured_output_omits_repo_when_no_findings
 test_commit_sha_default_branch_finding_has_no_release_notes_url
 test_commit_sha_release_uses_tag_ref_for_commit_lookup
+test_sha_reporting_and_updates
+test_sha_untagged_and_failed_comparisons
+test_sha_pin_option_and_policy
+test_sha_pin_non_semver_targets
+test_sha_subpaths_and_default_branch
+test_sha_pr_flow
+test_snitchignore
 test_output_format_validation
 test_pr_flow
 test_pr_targets_push_repository

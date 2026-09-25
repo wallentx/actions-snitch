@@ -1,0 +1,2 @@
+# Local fixture checkouts are test data, not maintained actions.
+.test/

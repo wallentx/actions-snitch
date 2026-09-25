@@ -36,13 +36,14 @@ AI-assisted updates additionally require Simon Willison's [`llm` CLI](https://ll
 ## Usage
 
 ```bash
-actions-snitch [-c] [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]
+actions-snitch [-c] [-u] [-s] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]
 ```
 
 ### Options
 
 - `-c` Interactively create the config file and exit (use alone)
 - `-u` Update outdated actions in-place
+- `-s` Pin proposed updates to full commit SHAs; combine with `-u` or `-p` to apply
 - `-f` Force updates regardless of compatibility score (requires -u or -p)
 - `-p` Commit, push, and create a pull request after updating actions (implies -u)
 - `-b` Branch to update or create before applying changes (requires -u or -p)
@@ -50,6 +51,46 @@ actions-snitch [-c] [-u] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]
 - `-t` Only update actions from GitHub Marketplace verified creators (requires -u or -p)
 - `-v` Verbose output - show skipped actions and debug info
 - `-h` Display help message
+
+### SHA pins and readable versions
+
+```bash
+actions-snitch -s       # Preview updates as full SHA pins
+actions-snitch -u -s    # Apply updates as full SHA pins
+actions-snitch -u       # Preserve each reference's existing tag/SHA style
+```
+
+| Current reference | `-u` | `-u -s` |
+| --- | --- | --- |
+| Release tag | Updated tag (major-only tags stay major-only) | Latest release's full commit SHA |
+| Full commit SHA | Updated full commit SHA | Updated full commit SHA |
+
+`-s` also converts already-current release tags to SHA pins. Branch references such as `main` and `master` remain skipped. Existing compatibility, AI, and verified-creator gates still apply.
+
+SHA findings show the current SHA's **exact matching tag**, the latest release, and its resolved commit SHA. All tag pages are searched; when multiple tags match, the lowest full stable semantic version is preferred over moving major/minor aliases. This is an exact commit match, not a claim about the first release containing an ancestor commit.
+
+```text
+Current: <40-character current SHA>
+Current SHA matches tag: v3.11.1
+Latest: 4.4.1
+Latest SHA: <40-character latest SHA>
+```
+
+If no tag matches, `Commits since: N` replaces the tag line. The count comes from [GitHub's compare API](https://docs.github.com/en/rest/commits/commits#compare-two-commits), including counts beyond one page of commits. With no release, the default branch's SHA is the target. Only a target strictly ahead of the current SHA is an update: identical, behind, and diverged histories are never automatically rewritten. Failed SHA resolution or comparison emits a warning and skips the update. A tag lookup failure is reported separately from a successful lookup with no matches.
+
+### Ignoring fixtures
+
+Create `.snitchignore` in the directory where you run actions-snitch. This repository includes `.test/` to exclude local fixture checkouts from both findings and updates.
+
+```text
+# Paths are relative to the scan directory.
+.test/
+fixtures with spaces/
+.github/workflows/example-*.yml
+!.github/workflows/example-maintained.yml
+```
+
+Patterns are Bash globs, not full `.gitignore` syntax: `*`, `?`, and character classes are supported, `*` can span `/`, a trailing `/` matches all descendants, and a leading `/` or `./` is optional. Blank lines and lines beginning with `#` are ignored. `!` re-includes a matching path; the last matching rule wins. `.gitignore` does not control scanning.
 
 ### Example Output
 
@@ -66,6 +107,8 @@ Findings in .github/workflows/build.yml:
 ### Structured Output
 
 Use `-o json`, `-o md`, or `-o yaml` to print only findings in a machine-readable or report-friendly format. Structured output is grouped under the name of the scanned repository and prints nothing when there are no findings.
+
+SHA metadata is included in JSON, YAML, and Markdown: `current_tag`, `latest_sha`, `commits_since`, and the exact proposed `update_ref`. Unavailable SHA metadata is `null` in JSON/YAML.
 
 Actions from GitHub Marketplace verified creators are marked with `☑️` in human and Markdown output. JSON and YAML output keep the action name unchanged and include a `verified_creator` boolean.
 
