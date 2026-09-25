@@ -2173,8 +2173,9 @@ scan_files() {
                 if [[ -n "$current_major_minor_patch" && "$current_major_minor_patch" != "$latest_major_minor_patch" ]]; then
                     needs_update=true
                 fi
+                # Resolve every proposed -s target, including branches and non-semver releases.
                 # -s also pins already-current release tags.
-                if $PIN_SHA && [[ -n "$current_major_minor_patch" && -n "$latest_major_minor_patch" ]]; then
+                if $PIN_SHA && { $needs_update || [[ -n "$current_major_minor_patch" && -n "$latest_major_minor_patch" ]]; }; then
                     if ! latest_sha=$(resolve_commit_sha "$repo" "$latest_ref"); then
                         msg "warning" "Unable to resolve $repo@$latest_ref to a commit; skipping." >&2
                         continue

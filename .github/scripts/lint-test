@@ -1245,6 +1245,43 @@ test_sha_pin_option_and_policy() {
   grep -q 'actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$repo/.github/workflows/build.yml" || fail "-f must allow low-score SHA update"
 }
 
+test_sha_pin_non_semver_targets() {
+  local case_dir="$TMP_ROOT/sha-pin-non-semver" bin_dir="$TMP_ROOT/sha-pin-non-semver/bin"
+  local repo="$case_dir/repo" variant mode output expected_latest cache before
+  local -a target_env resolve_env
+  mkdir -p "$repo"
+  write_sha_stubs "$bin_dir" 90
+  init_workflow_repo "$repo"
+  for variant in default-branch non-semver-release; do
+    if [[ "$variant" == default-branch ]]; then
+      target_env=(TEST_SHA_NO_RELEASE=true)
+      expected_latest=main
+    else
+      target_env=(TEST_SHA_RELEASE=release-stable)
+      expected_latest=release-stable
+    fi
+    for mode in success api-failure invalid-sha; do
+      yq -i '.jobs.build.steps[0].uses = "actions/checkout@v2"' "$repo/.github/workflows/build.yml"
+      before=$(cat "$repo/.github/workflows/build.yml")
+      cache="$case_dir/$variant-$mode"
+      resolve_env=()
+      case "$mode" in
+        api-failure) resolve_env=(TEST_SHA_RESOLVE_FAIL=true) ;;
+        invalid-sha) resolve_env=(TEST_SHA_LATEST=main) ;;
+      esac
+      output=$(cd "$repo" && env "${target_env[@]}" "${resolve_env[@]}" PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$cache" "$SCRIPT" -u -s -o json 2>"$case_dir/error")
+      if [[ "$mode" == success ]]; then
+        [[ "$(yq '.jobs.build.steps[0].uses' "$repo/.github/workflows/build.yml")" == actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] || fail "-s must resolve $variant to a full SHA"
+        jq -e --arg latest "$expected_latest" '.repo[0] | .latest == $latest and .latest_sha == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and .update_ref == .latest_sha' <<< "$output" >/dev/null || fail "$variant report must identify the actual SHA target"
+      else
+        [[ "$(cat "$repo/.github/workflows/build.yml")" == "$before" ]] || fail "$variant $mode must leave the workflow unchanged"
+        [[ -z "$output" ]] || fail "$variant $mode must not propose a mutable ref"
+        grep -q 'Unable to resolve' "$case_dir/error" || fail "$variant $mode must report the resolution failure"
+      fi
+    done
+  done
+}
+
 test_sha_subpaths_and_default_branch() {
   local case_dir="$TMP_ROOT/sha-subpaths" bin_dir="$TMP_ROOT/sha-subpaths/bin"
   local repo="$case_dir/repo" output
@@ -1944,6 +1981,7 @@ test_commit_sha_release_uses_tag_ref_for_commit_lookup
 test_sha_reporting_and_updates
 test_sha_untagged_and_failed_comparisons
 test_sha_pin_option_and_policy
+test_sha_pin_non_semver_targets
 test_sha_subpaths_and_default_branch
 test_sha_pr_flow
 test_snitchignore
