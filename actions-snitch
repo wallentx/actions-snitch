@@ -255,7 +255,7 @@ load_ai_config() {
         esac
         if [[ "$AI_PROVIDER" == antigravity ]]; then
             case "$AI_MODEL" in
-                *-low|*-medium|*-high)
+                *-low|*-medium|*-high|*-max)
                     if [[ "$AI_EFFORT" != "${AI_MODEL##*-}" ]]; then
                         msg "error" "Error: AI effort '$AI_EFFORT' conflicts with the pinned effort in model '$AI_MODEL'"
                         exit 1
@@ -461,7 +461,7 @@ if [[ "$AI_ENABLED" == "true" ]] && (( AI_THRESHOLD > LOW_SCORE_THRESHOLD )); th
     LOW_SCORE_THRESHOLD="$AI_THRESHOLD"
 fi
 
-if [[ "$AI_ENABLED" == "true" ]] && $UPDATE; then
+if [[ "$AI_ENABLED" == "true" ]] && $UPDATE && ! $FORCE; then
     if ! AI_PROVIDER_BINARY=$(ai_provider_binary "$AI_PROVIDER"); then
         expected_binary=$(ai_provider_binary_name "$AI_PROVIDER")
         msg "error" "Error: AI provider '$AI_PROVIDER' requires the '$expected_binary' CLI, but it was not detected."
@@ -2496,7 +2496,7 @@ scan_files() {
                     compatibility_requires_review=true
                 fi
                 should_run_ai=false
-                if [[ "$AI_ENABLED" == "true" ]] && $compatibility_requires_review; then
+                if [[ "$AI_ENABLED" == "true" ]] && ! $FORCE && $compatibility_requires_review; then
                     if $compatibility_unknown || (( COMPAT_SCORE < AI_THRESHOLD )); then
                         should_run_ai=true
                     fi

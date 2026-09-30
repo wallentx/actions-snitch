@@ -132,6 +132,8 @@ AI analysis is opt-in and only runs during `-u` or `-p` when an action's compati
 
 An `allow` decision may include narrowly scoped remediation for the affected action step's `with:` inputs. Before making any change, actions-snitch verifies the workflow file, exact action line and full action path, current action version, input name, and current scalar value. Sensitive inputs, arbitrary YAML patches, permissions, triggers, environment variables, shell commands, and changes outside the affected action step are rejected. All proposed input changes are validated and applied to temporary copies first, so an invalid proposal cannot partially modify the repository. Missing local usage evidence or either action definition, backend errors, and invalid responses fail closed; `-f` remains the explicit version-update override and never applies an unvalidated remediation.
 
+Forced updates with `-f` bypass AI assessment, send no workflow evidence to an AI provider, and require neither a provider CLI nor a model. They update action references without applying AI remediation.
+
 Run the interactive setup:
 
 ```bash
@@ -179,7 +181,7 @@ Codex, Claude, Gemini, OpenCode, Copilot, and Antigravity receive the complete a
 
 With `-p`, actions-snitch pushes to `origin` and opens the PR in the repository selected by `origin`'s push URL, targeting that repository's default branch. When `origin` pushes to your fork, the PR stays in your fork instead of GitHub CLI's inferred upstream repository. The destination is checked before any branch or workflow changes.
 
-PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count. AI-approved updates or updates forced after an AI assessment also include the model's validated compatibility investigation; successfully applied input remediations are listed in that same collapsible section.
+PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count. AI-approved updates also include the model's validated compatibility investigation; successfully applied input remediations are listed in that same collapsible section.
 
 ## How It Works
 

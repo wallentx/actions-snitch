@@ -837,6 +837,71 @@ test_force_gate() {
     fail "-u -f should apply low compatibility updates"
 }
 
+test_force_bypasses_ai() {
+  local variant score case_dir repo cmd cmd_path run_path model
+
+  for variant in present absent; do
+    for score in 50 Unknown; do
+      case_dir="$TMP_ROOT/force-ai-$variant-$score"
+      repo="$case_dir/repo"
+      mkdir -p "$repo"
+      write_stubs "$case_dir/bin" "$score"
+      init_ai_workflow_repo "$repo"
+      model=test-model
+      if [[ "$variant" == present ]]; then
+        write_ai_stub "$case_dir/bin" remediate "$case_dir/codex"
+        run_path="$case_dir/bin:$PATH"
+      else
+        model=""
+        # This PATH contains scan dependencies but no AI provider binary.
+        for cmd in bash jq yq git tput mkdir dirname date md5sum sha256sum shasum \
+          sed tr cut grep cat find sort head tail wc basename stat cp rm sleep; do
+          cmd_path=$(command -v "$cmd" 2>/dev/null) || continue
+          ln -s "$cmd_path" "$case_dir/bin/$cmd"
+        done
+        run_path="$case_dir/bin"
+      fi
+
+      (cd "$repo" && PATH="$run_path" XDG_CACHE_HOME="$case_dir/cache" \
+        ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL="$model" "$SCRIPT" -u -f >/dev/null)
+      [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+        fail "a forced $score update must work with the $variant provider"
+      [[ ! -e "$case_dir/codex.args" && ! -e "$case_dir/codex.prompt" ]] ||
+        fail "a forced update must not invoke AI or send workflow evidence"
+      [[ "$(yq -r '.jobs.build.steps[0].with["fetch-depth"]' "$repo/.github/workflows/build.yml")" == 0 ]] ||
+        fail "a forced update must not apply AI input remediation"
+    done
+  done
+}
+
+test_antigravity_max_effort() {
+  local case_dir="$TMP_ROOT/antigravity-max" repo original
+  repo="$case_dir/repo"
+  mkdir -p "$repo"
+  write_stubs "$case_dir/bin" 50
+  write_provider_adapter_stub "$case_dir/bin" antigravity
+  init_ai_workflow_repo "$repo"
+  original=$(cat "$repo/.github/workflows/build.yml")
+
+  if (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+    TEST_PROVIDER_LOG="$case_dir/provider" ACTIONS_SNITCH_AI=true \
+    ACTIONS_SNITCH_AI_PROVIDER=antigravity ACTIONS_SNITCH_AI_MODEL=test-model-max \
+    ACTIONS_SNITCH_AI_EFFORT=high "$SCRIPT" -u >"$case_dir/conflict" 2>&1); then
+    fail "a -max model must reject a conflicting effort"
+  fi
+  grep -q 'conflicts with the pinned effort' "$case_dir/conflict" ||
+    fail "a -max effort conflict must report its model constraint"
+  [[ ! -e "$case_dir/provider.args" && "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] ||
+    fail "a -max effort conflict must stop before invoking AI or editing workflows"
+
+  (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+    TEST_PROVIDER_LOG="$case_dir/provider" ACTIONS_SNITCH_AI=true \
+    ACTIONS_SNITCH_AI_PROVIDER=antigravity ACTIONS_SNITCH_AI_MODEL=test-model-max \
+    ACTIONS_SNITCH_AI_EFFORT=max "$SCRIPT" -u >/dev/null)
+  [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+    fail "a -max model must accept its matching max effort"
+}
+
 test_unknown_compatibility_gate() {
   local score case_dir ai_dir skip_dir force_dir review_dir output prompt
 
@@ -2007,6 +2072,8 @@ test_ai_threshold_policy() {
 100 90 4 yes
 80 80 4 no
 50 70 4 no force
+80 50 4 no force
+80 Unknown 4 no force
 CASES
   for threshold in 101 999999999999999999999999999999999 08x; do
     if (cd "$case_dir/repo" && PATH="$case_dir/bin:$PATH" ACTIONS_SNITCH_AI_THRESHOLD="$threshold" "$SCRIPT" -u >/dev/null 2>&1); then
@@ -2242,6 +2309,8 @@ test_option_validation
 test_update_in_place
 test_update_branch_creation
 test_force_gate
+test_force_bypasses_ai
+test_antigravity_max_effort
 test_unknown_compatibility_gate
 test_ai_provider_adapters
 test_large_ai_provider_prompts
