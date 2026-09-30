@@ -12,7 +12,7 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 - 🚀 Shows compatibility scores between versions
 - 💾 Caches API responses for faster subsequent runs (24h TTL)
 - 🔄 Can automatically create PRs to update actions
-- 🤖 Can ask an optional, provider-neutral LLM to investigate low compatibility scores before updating
+- 🤖 Can ask an optional authenticated provider CLI to investigate low or unknown compatibility scores before updating
 - ☑️ Indicates GitHub Marketplace verified creators
 - 🎨 Cute color-coded output with status badges
 - 🏃 Fast local execution
@@ -26,7 +26,17 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 - `curl`
 - `git`
 
-AI-assisted updates additionally require Simon Willison's [`llm` CLI](https://llm.datasette.io/en/stable/setup.html) and a schema-capable model. Provider plugins are listed in the [`llm` plugin directory](https://llm.datasette.io/en/stable/plugins/directory.html).
+AI-assisted updates additionally require an authenticated, supported provider CLI. The interactive setup detects these exact executable names:
+
+| Provider | Executable | Non-interactive interface |
+| --- | --- | --- |
+| [OpenAI Codex](https://developers.openai.com/blog/eval-skills) | `codex` | `codex exec` with an output schema |
+| [Claude Code](https://code.claude.com/docs/en/cli-usage) | `claude` | `claude -p` with a JSON schema |
+| [Cursor Agent](https://cursor.com/docs/en/cli/headless) | `agent` (`cursor-agent` compatibility alias) | Print mode with JSON output |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/tutorials/automation.md) | `gemini` | Headless mode with JSON output |
+| [OpenCode](https://opencode.ai/v2/docs/cli/commands/) | `opencode` | `opencode run` with JSON events |
+| [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference) | `copilot` | Prompt mode with JSON events |
+| [Google Antigravity](https://www.antigravity.google/docs/cli/headless/) | `agy` | Print mode with a JSON schema |
 
 ## Installation
 
@@ -118,9 +128,11 @@ Markdown output links the repository heading to the `origin` remote when one is 
 
 ### AI-Assisted Updates
 
-AI analysis is opt-in and only runs during `-u` or `-p` when an action's compatibility score is below the configured threshold. The model receives redacted workflow context and both action definitions. Release notes, changelogs, compare commits, and a bounded upstream issue search provide additional evidence when available. Scores below 80 still require AI approval or `-f`; lowering the AI threshold does not permit automatic updates between that threshold and 80. It must return a schema-validated `allow`, `review`, or `block` decision.
+AI analysis is opt-in and only runs during `-u` or `-p` when an action's compatibility score is below the configured threshold. The model receives redacted workflow context and both action definitions. Release notes, changelogs, compare commits, and a bounded upstream issue search provide additional evidence when available. Scores below 80 still require AI approval or `-f`; lowering the AI threshold does not permit automatic updates between that threshold and 80. Unknown or invalid compatibility scores also require AI approval or `-f`, so a missing score never authorizes an update by itself. The model must return a schema-validated `allow`, `review`, or `block` decision.
 
 An `allow` decision may include narrowly scoped remediation for the affected action step's `with:` inputs. Before making any change, actions-snitch verifies the workflow file, exact action line and full action path, current action version, input name, and current scalar value. Sensitive inputs, arbitrary YAML patches, permissions, triggers, environment variables, shell commands, and changes outside the affected action step are rejected. All proposed input changes are validated and applied to temporary copies first, so an invalid proposal cannot partially modify the repository. Missing local usage evidence or either action definition, backend errors, and invalid responses fail closed; `-f` remains the explicit version-update override and never applies an unvalidated remediation.
+
+Forced updates with `-f` bypass AI assessment, send no workflow evidence to an AI provider, and require neither a provider CLI nor a model. They update action references without applying AI remediation.
 
 Run the interactive setup:
 
@@ -128,7 +140,7 @@ Run the interactive setup:
 actions-snitch -c
 ```
 
-It asks whether to enable AI, which model to use, the compatibility threshold, upstream issue search policy, and an optional credential environment variable name. Use `llm models list` to find your model ID. AI stays disabled by default.
+It asks whether to enable AI, which detected provider and model to use, the provider effort level when discoverable, the compatibility threshold, and the upstream issue search policy. The provider prompt lists only supported executables found on `PATH`. Cursor, OpenCode, and Antigravity expose non-interactive model lists, so setup presents numbered model choices for them. Claude and Copilot offer their documented effort levels. Antigravity model IDs encode the effort, so setup skips its effort picker and saves no separate effort override. Other providers use manual model entry and their default effort because their CLIs do not expose a reliable non-interactive catalog. AI stays disabled by default.
 
 Setup creates `~/.config/actions-snitch/config.yaml` (or `$XDG_CONFIG_HOME/actions-snitch/config.yaml`) with owner-only permissions. `ACTIONS_SNITCH_CONFIG` can select a different file. Existing files are never overwritten; edit them directly to change settings. Press Ctrl-C to cancel before writing. Setup only requires `jq` and `yq`, and does not scan or modify a repository.
 
@@ -137,35 +149,39 @@ The generated file has this shape:
 ```yaml
 ai:
   enabled: false
-  backend: llm
-  model: your-installed-model-id
+  provider: codex
+  model: your-provider-model-id
+  # Optional when the selected provider and model support it.
+  # effort: high
   threshold: 80
   issue_search: auto
-  # Optional: require this environment variable to be set.
-  # api_key_env: OPENAI_API_KEY
 ```
 
-Store credentials with the provider's environment variable or the `llm` key store, not in this file. For example:
+The selected CLI uses its existing login session, so the actions-snitch configuration does not store provider credentials. Authenticate with that CLI before enabling AI. For example:
 
 ```bash
-llm keys set openai
+codex login
 ACTIONS_SNITCH_AI=true actions-snitch -u
 ```
 
 Environment variables override the corresponding defaults:
 
 - `ACTIONS_SNITCH_AI=true|false`
+- `ACTIONS_SNITCH_AI_PROVIDER=codex|claude|cursor|gemini|opencode|copilot|antigravity`
 - `ACTIONS_SNITCH_AI_MODEL=model-id`
+- `ACTIONS_SNITCH_AI_EFFORT=provider-supported-level`
 - `ACTIONS_SNITCH_AI_THRESHOLD=0..100`
 - `ACTIONS_SNITCH_CONFIG=/path/to/config.yaml`
 
-The `llm` request uses `--no-log`, so workflow evidence is not written to its local prompt database. Redacted workflow evidence is still sent to the selected model provider; use a local model plugin when repository policy prohibits that.
+Each assessment runs non-interactively in a temporary directory. Codex, Claude, and Antigravity receive the actions-snitch JSON schema directly. Cursor, Gemini, OpenCode, and Copilot return machine-readable envelopes, from which actions-snitch extracts and validates the final JSON response against the same schema. Every backend error, missing response, parse failure, or schema violation fails closed. The request sends redacted workflow evidence to the selected provider through its authenticated CLI session.
+
+Codex, Claude, Gemini, OpenCode, Copilot, and Antigravity receive the complete assessment prompt through stdin. The Cursor adapter requires a command argument, so prompts above 32 KiB require manual review without invoking the CLI. This limit counts bytes and preserves the complete workflow evidence.
 
 ### Pull Request Body
 
 With `-p`, actions-snitch pushes to `origin` and opens the PR in the repository selected by `origin`'s push URL, targeting that repository's default branch. When `origin` pushes to your fork, the PR stays in your fork instead of GitHub CLI's inferred upstream repository. The destination is checked before any branch or workflow changes.
 
-PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count. AI-approved updates or updates forced after an AI assessment also include the model's validated compatibility investigation; successfully applied input remediations are listed in that same collapsible section.
+PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count. AI-approved updates also include the model's validated compatibility investigation; successfully applied input remediations are listed in that same collapsible section.
 
 ## How It Works
 

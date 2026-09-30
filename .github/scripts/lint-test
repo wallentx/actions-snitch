@@ -10,7 +10,7 @@ SCRIPT="$ROOT/actions-snitch"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/actions-snitch-lint-test.XXXXXXXXXX")
 
 # Never load a developer's live AI configuration during fixture tests.
-unset ACTIONS_SNITCH_CONFIG ACTIONS_SNITCH_AI ACTIONS_SNITCH_AI_MODEL ACTIONS_SNITCH_AI_THRESHOLD
+unset ACTIONS_SNITCH_CONFIG ACTIONS_SNITCH_AI ACTIONS_SNITCH_AI_PROVIDER ACTIONS_SNITCH_AI_MODEL ACTIONS_SNITCH_AI_EFFORT ACTIONS_SNITCH_AI_THRESHOLD
 export XDG_CONFIG_HOME="$TMP_ROOT/config"
 
 cleanup() {
@@ -138,22 +138,38 @@ CURL
 write_ai_stub() {
   local bindir="$1"
   local decision="$2"
-  local llm_log="$3"
+  local codex_log="$3"
 
-  cat > "$bindir/llm" <<LLM
+  cat > "$bindir/codex" <<CODEX
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf '%s\\n' "\$*" > "${llm_log}.args"
+printf '%s\\n' "\$*" > "${codex_log}.args"
 prompt=\$(cat)
-printf '%s' "\$prompt" > "${llm_log}.prompt"
+evidence=\${prompt#*'<evidence_json>'}
+evidence=\${evidence%%'</evidence_json>'*}
+evidence=\${evidence#\$'\\n'}
+evidence=\${evidence%\$'\\n'}
+printf '%s' "\$evidence" > "${codex_log}.prompt"
+
+output_file=""
+while (( \$# > 0 )); do
+  case "\$1" in
+    -o|--output-last-message)
+      output_file="\$2"
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+[[ -n "\$output_file" ]] || exit 2
 
 case "$decision" in
   invalid)
-    printf 'not-json\\n'
+    printf 'not-json\\n' > "\$output_file"
     ;;
   remediate)
-    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$prompt")
+    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$evidence")
     jq -cn --argjson line "\$line" '{
       decision: "allow",
       confidence: "high",
@@ -183,10 +199,10 @@ case "$decision" in
           reason: "The proposed version should use its new clean default."
         }
       ]
-    }'
+    }' > "\$output_file"
     ;;
   unsafe-remediation)
-    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$prompt")
+    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$evidence")
     jq -cn --argjson line "\$line" '{
       decision: "allow",
       confidence: "high",
@@ -216,15 +232,69 @@ case "$decision" in
           reason: "This must be rejected as a sensitive input."
         }
       ]
-    }'
+    }' > "\$output_file"
     ;;
   *)
-    printf '%s\\n' '{"decision":"$decision","confidence":"high","summary":"The observed checkout configuration is compatible with v4.","findings":[{"caution_detail":"Checkout token handling changed.","safety":"The workflow uses an explicit token and remains compatible.","evidence":"release_notes"}],"remediations":[]}'
+    printf '%s\\n' '{"decision":"$decision","confidence":"high","summary":"The observed checkout configuration is compatible with v4.","findings":[{"caution_detail":"Checkout token handling changed.","safety":"The workflow uses an explicit token and remains compatible.","evidence":"release_notes"}],"remediations":[]}' > "\$output_file"
     ;;
 esac
-LLM
+CODEX
 
-  chmod +x "$bindir/llm"
+  chmod +x "$bindir/codex"
+}
+
+write_provider_adapter_stub() {
+  local bindir="$1"
+  local provider="$2"
+  local binary
+
+  case "$provider" in
+    claude) binary=claude ;;
+    cursor) binary=agent ;;
+    gemini) binary=gemini ;;
+    opencode) binary=opencode ;;
+    copilot) binary=copilot ;;
+    antigravity) binary=agy ;;
+    *) fail "unsupported provider stub: $provider" ;;
+  esac
+
+  cat > "$bindir/$binary" <<'PROVIDER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" > "$TEST_PROVIDER_LOG.args"
+binary=$(basename "$0")
+prompt=""
+case "$binary" in
+  agent|cursor-agent) prompt="${!#}" ;;
+  agy) prompt=$(jq -er 'select(.event == "user") | .message.content') ;;
+  *) prompt=$(cat) ;;
+esac
+printf '%s' "$prompt" > "$TEST_PROVIDER_LOG.prompt"
+
+assessment='{"decision":"allow","confidence":"high","summary":"Provider adapter accepted the upgrade.","findings":[{"caution_detail":"Provider adapter test.","safety":"The test evidence is compatible.","evidence":"workflow"}],"remediations":[]}'
+case "$binary" in
+  claude)
+    jq -cn --argjson assessment "$assessment" '{structured_output: $assessment}'
+    ;;
+  agent|cursor-agent)
+    jq -cn --arg assessment "$assessment" '{type: "result", subtype: "success", result: $assessment}'
+    ;;
+  gemini)
+    jq -cn --arg assessment "$assessment" '{response: $assessment}'
+    ;;
+  opencode)
+    jq -cn --arg assessment "$assessment" '{type: "text", part: {text: $assessment}}'
+    ;;
+  copilot)
+    jq -cn --arg assessment "$assessment" '{type: "assistant.message", data: {content: $assessment}}'
+    ;;
+  agy)
+    jq -cn --argjson assessment "$assessment" '{event: "result", result: {status: "SUCCESS", structured_output: $assessment}}'
+    ;;
+esac
+PROVIDER
+  chmod +x "$bindir/$binary"
 }
 
 write_multi_action_stubs() {
@@ -767,26 +837,239 @@ test_force_gate() {
     fail "-u -f should apply low compatibility updates"
 }
 
+test_force_bypasses_ai() {
+  local variant score case_dir repo cmd cmd_path run_path model
+
+  for variant in present absent; do
+    for score in 50 Unknown; do
+      case_dir="$TMP_ROOT/force-ai-$variant-$score"
+      repo="$case_dir/repo"
+      mkdir -p "$repo"
+      write_stubs "$case_dir/bin" "$score"
+      init_ai_workflow_repo "$repo"
+      model=test-model
+      if [[ "$variant" == present ]]; then
+        write_ai_stub "$case_dir/bin" remediate "$case_dir/codex"
+        run_path="$case_dir/bin:$PATH"
+      else
+        model=""
+        # This PATH contains scan dependencies but no AI provider binary.
+        for cmd in bash jq yq git tput mkdir dirname date md5sum sha256sum shasum \
+          sed tr cut grep cat find sort head tail wc basename stat cp rm sleep; do
+          cmd_path=$(command -v "$cmd" 2>/dev/null) || continue
+          ln -s "$cmd_path" "$case_dir/bin/$cmd"
+        done
+        run_path="$case_dir/bin"
+      fi
+
+      (cd "$repo" && PATH="$run_path" XDG_CACHE_HOME="$case_dir/cache" \
+        ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL="$model" "$SCRIPT" -u -f >/dev/null)
+      [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+        fail "a forced $score update must work with the $variant provider"
+      [[ ! -e "$case_dir/codex.args" && ! -e "$case_dir/codex.prompt" ]] ||
+        fail "a forced update must not invoke AI or send workflow evidence"
+      [[ "$(yq -r '.jobs.build.steps[0].with["fetch-depth"]' "$repo/.github/workflows/build.yml")" == 0 ]] ||
+        fail "a forced update must not apply AI input remediation"
+    done
+  done
+}
+
+test_antigravity_max_effort() {
+  local case_dir="$TMP_ROOT/antigravity-max" repo original
+  repo="$case_dir/repo"
+  mkdir -p "$repo"
+  write_stubs "$case_dir/bin" 50
+  write_provider_adapter_stub "$case_dir/bin" antigravity
+  init_ai_workflow_repo "$repo"
+  original=$(cat "$repo/.github/workflows/build.yml")
+
+  if (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+    TEST_PROVIDER_LOG="$case_dir/provider" ACTIONS_SNITCH_AI=true \
+    ACTIONS_SNITCH_AI_PROVIDER=antigravity ACTIONS_SNITCH_AI_MODEL=test-model-max \
+    ACTIONS_SNITCH_AI_EFFORT=high "$SCRIPT" -u >"$case_dir/conflict" 2>&1); then
+    fail "a -max model must reject a conflicting effort"
+  fi
+  grep -q 'conflicts with the pinned effort' "$case_dir/conflict" ||
+    fail "a -max effort conflict must report its model constraint"
+  [[ ! -e "$case_dir/provider.args" && "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] ||
+    fail "a -max effort conflict must stop before invoking AI or editing workflows"
+
+  (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+    TEST_PROVIDER_LOG="$case_dir/provider" ACTIONS_SNITCH_AI=true \
+    ACTIONS_SNITCH_AI_PROVIDER=antigravity ACTIONS_SNITCH_AI_MODEL=test-model-max \
+    ACTIONS_SNITCH_AI_EFFORT=max "$SCRIPT" -u >/dev/null)
+  [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+    fail "a -max model must accept its matching max effort"
+}
+
+test_unknown_compatibility_gate() {
+  local score case_dir ai_dir skip_dir force_dir review_dir output prompt
+
+  for score in Unknown 101 18446744073709551715; do
+    case_dir="$TMP_ROOT/unknown-score-$score"
+    ai_dir="$case_dir/ai"
+    skip_dir="$case_dir/skip"
+    force_dir="$case_dir/force"
+    review_dir="$case_dir/review"
+    mkdir -p "$ai_dir/repo" "$skip_dir/repo" "$force_dir/repo" "$review_dir/repo"
+    write_stubs "$ai_dir/bin" "$score"
+    write_stubs "$skip_dir/bin" "$score"
+    write_stubs "$force_dir/bin" "$score"
+    write_stubs "$review_dir/bin" "$score"
+    write_ai_stub "$ai_dir/bin" allow "$ai_dir/codex"
+    write_ai_stub "$review_dir/bin" review "$review_dir/codex"
+    init_ai_workflow_repo "$ai_dir/repo"
+    init_ai_workflow_repo "$review_dir/repo"
+    init_workflow_repo "$skip_dir/repo"
+    init_workflow_repo "$force_dir/repo"
+
+    (cd "$ai_dir/repo" && PATH="$ai_dir/bin:$PATH" XDG_CACHE_HOME="$ai_dir/cache" \
+      ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
+    [[ "$(workflow_ref "$ai_dir/repo")" == *"actions/checkout@v4"* ]] ||
+      fail "$score should allow an update after AI approval"
+    prompt=$(cat "$ai_dir/codex.prompt")
+    [[ "$prompt" == *'"compatibility_score":"Unknown"'* ]] ||
+      fail "$score should reach AI as an unknown compatibility score"
+
+    (cd "$review_dir/repo" && PATH="$review_dir/bin:$PATH" XDG_CACHE_HOME="$review_dir/cache" \
+      ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
+    [[ -s "$review_dir/codex.prompt" && "$(workflow_ref "$review_dir/repo")" == *"actions/checkout@v2"* ]] ||
+      fail "$score should require a validated AI allow decision"
+
+    output=$(cd "$skip_dir/repo" && PATH="$skip_dir/bin:$PATH" XDG_CACHE_HOME="$skip_dir/cache" \
+      ACTIONS_SNITCH_AI=false TERM=dumb "$SCRIPT" -u)
+    [[ "$(workflow_ref "$skip_dir/repo")" == *"actions/checkout@v2"* ]] ||
+      fail "$score should fail closed without AI"
+    [[ "$output" == *"compatibility score is unknown"* ]] ||
+      fail "$score should explain why its update was skipped"
+
+    (cd "$force_dir/repo" && PATH="$force_dir/bin:$PATH" XDG_CACHE_HOME="$force_dir/cache" \
+      ACTIONS_SNITCH_AI=false "$SCRIPT" -u -f >/dev/null)
+    [[ "$(workflow_ref "$force_dir/repo")" == *"actions/checkout@v4"* ]] ||
+      fail "$score should update with the explicit -f override"
+  done
+}
+
+test_ai_provider_adapters() {
+  local provider case_dir repo args prompt effort
+
+  for provider in claude cursor gemini opencode copilot antigravity; do
+    case_dir="$TMP_ROOT/provider-$provider"
+    repo="$case_dir/repo"
+    mkdir -p "$repo"
+    write_stubs "$case_dir/bin" 50
+    write_provider_adapter_stub "$case_dir/bin" "$provider"
+    init_ai_workflow_repo "$repo"
+    effort=""
+    case "$provider" in claude|copilot|antigravity) effort=high ;; esac
+
+    (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+      TEST_PROVIDER_LOG="$case_dir/provider" ACTIONS_SNITCH_AI=true \
+      ACTIONS_SNITCH_AI_PROVIDER="$provider" ACTIONS_SNITCH_AI_MODEL=test-model \
+      ACTIONS_SNITCH_AI_EFFORT="$effort" \
+      "$SCRIPT" -u >/dev/null)
+
+    [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
+      fail "$provider adapter should accept a validated allow decision"
+    prompt=$(cat "$case_dir/provider.prompt")
+    [[ "$prompt" == *'<evidence_json>'* && "$prompt" == *'"fetch-depth":0'* ]] ||
+      fail "$provider adapter should receive the redacted evidence prompt"
+    args=$(cat "$case_dir/provider.args")
+    [[ "$args" == *"test-model"* ]] || fail "$provider adapter should receive the configured model"
+    if [[ -n "$effort" ]]; then
+      [[ "$args" == *"effort"* && "$args" == *"high"* ]] ||
+        fail "$provider adapter should receive the configured effort"
+    fi
+    case "$provider" in
+      claude)
+        [[ "$args" == *"--json-schema"* && "$args" == *"--no-session-persistence"* ]] ||
+          fail "claude adapter should request ephemeral schema-constrained output" ;;
+      cursor)
+        [[ "$args" == *"-p"* && "$args" == *"--output-format json"* ]] ||
+          fail "cursor adapter should use print-mode JSON output" ;;
+      gemini)
+        [[ "$args" == *"-p"* && "$args" == *"--output-format json"* && "$args" == *"--sandbox"* ]] ||
+          fail "gemini adapter should use sandboxed headless JSON output" ;;
+      opencode)
+        [[ "$args" == *"run"* && "$args" == *"--format json"* && "$args" == *"--agent plan"* ]] ||
+          fail "opencode adapter should use its non-interactive plan agent" ;;
+      copilot)
+        [[ "$args" == *"--no-ask-user"* && "$args" == *"--output-format json"* ]] ||
+          fail "copilot adapter should use non-interactive JSON output" ;;
+      antigravity)
+        [[ "$args" == *"--input-format stream-json"* && "$args" == *"--output-format stream-json"* &&
+           "$args" == *"--json-schema"* && "$args" == *"--sandbox"* ]] ||
+          fail "antigravity adapter should request sandboxed schema-constrained output" ;;
+    esac
+  done
+}
+
+test_large_ai_provider_prompts() {
+  local provider case_dir repo original output
+
+  for provider in codex claude cursor gemini opencode copilot antigravity; do
+    case_dir="$TMP_ROOT/large-prompt-$provider"
+    repo="$case_dir/repo"
+    mkdir -p "$repo"
+    write_stubs "$case_dir/bin" 50
+    if [[ "$provider" == codex ]]; then
+      write_ai_stub "$case_dir/bin" allow "$case_dir/provider"
+    else
+      write_provider_adapter_stub "$case_dir/bin" "$provider"
+    fi
+    init_ai_workflow_repo "$repo"
+    {
+      printf '      - name: |\n          LARGE_WORKFLOW_START'
+      printf '%180000s' ''
+      printf 'LARGE_WORKFLOW_END\n        run: echo done\n'
+    } >> "$repo/.github/workflows/build.yml"
+    cp "$repo/.github/workflows/build.yml" "$repo/.github/workflows/second.yml"
+    original=$(cat "$repo/.github/workflows/build.yml")
+
+    output=$(cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+      TEST_PROVIDER_LOG="$case_dir/provider" ACTIONS_SNITCH_AI=true \
+      ACTIONS_SNITCH_AI_PROVIDER="$provider" ACTIONS_SNITCH_AI_MODEL=test-model \
+      TERM=dumb "$SCRIPT" -u 2>&1)
+
+    if [[ "$provider" == cursor ]]; then
+      [[ ! -e "$case_dir/provider.args" ]] || fail "Cursor must reject oversized prompts before invocation"
+      [[ "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] || fail "an oversized Cursor prompt must leave workflows unchanged"
+      [[ "$output" == *"Cursor prompt exceeds 32 KiB"* ]] || fail "Cursor must explain its prompt size limit"
+    else
+      [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] || fail "$provider must handle workflow evidence larger than an argument"
+      [[ "$(yq -r '.jobs.build.steps[0].uses' "$repo/.github/workflows/second.yml")" == actions/checkout@v4 ]] || fail "$provider must preserve all matching usages"
+      [[ "$(LC_ALL=C wc -c < "$case_dir/provider.prompt")" -gt 360000 ]] || fail "$provider must receive the complete large prompt"
+      grep -q LARGE_WORKFLOW_END "$case_dir/provider.prompt" || fail "$provider must receive the end of the evidence"
+      ! grep -q LARGE_WORKFLOW_END "$case_dir/provider.args" || fail "$provider must stream large prompts through stdin"
+      [[ "$output" != *"Argument list too long"* ]] || fail "$provider must not exceed exec argument limits"
+    fi
+  done
+}
+
 test_ai_allows_low_score_update_and_redacts_context() {
   local case_dir="$TMP_ROOT/ai-allow"
   local bin_dir="$case_dir/bin"
   local repo="$case_dir/repo"
-  local llm_log="$case_dir/llm"
+  local codex_log="$case_dir/codex"
   local args prompt
 
   mkdir -p "$repo"
   write_stubs "$bin_dir" 50
-  write_ai_stub "$bin_dir" allow "$llm_log"
+  write_ai_stub "$bin_dir" allow "$codex_log"
   init_ai_workflow_repo "$repo"
 
-  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true \
+    ACTIONS_SNITCH_AI_MODEL=test-model ACTIONS_SNITCH_AI_EFFORT=high "$SCRIPT" -u >/dev/null)
 
   [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
     fail "AI allow decision should apply a low compatibility update"
-  args=$(cat "${llm_log}.args")
-  [[ "$args" == *"--no-log"* && "$args" == *"--schema"* && "$args" == *"--model test-model"* ]] ||
-    fail "AI invocation should disable logging and request schema-constrained output"
-  prompt=$(cat "${llm_log}.prompt")
+  args=$(cat "${codex_log}.args")
+  [[ "$args" == *"exec"* && "$args" == *"--ephemeral"* && "$args" == *"--ignore-user-config"* &&
+     "$args" == *"--sandbox read-only"* && "$args" == *"--output-schema"* &&
+     "$args" == *"--output-last-message"* && "$args" == *"--model test-model"* &&
+     "$args" == *'model_reasoning_effort="high"'* ]] ||
+    fail "AI invocation should use an ephemeral, read-only Codex session with schema-constrained output"
+  prompt=$(cat "${codex_log}.prompt")
   [[ "$prompt" == *'"fetch-depth":0'* ]] ||
     fail "AI evidence should include the action's exact input configuration"
   [[ "$prompt" == *'"action_lines":['* ]] ||
@@ -805,7 +1088,7 @@ test_ai_rejects_unsafe_remediation() {
 
   mkdir -p "$repo"
   write_stubs "$bin_dir" 50
-  write_ai_stub "$bin_dir" unsafe-remediation "$case_dir/llm"
+  write_ai_stub "$bin_dir" unsafe-remediation "$case_dir/codex"
   init_ai_workflow_repo "$repo"
 
   output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TERM=dumb "$SCRIPT" -u)
@@ -825,7 +1108,7 @@ test_ai_review_and_invalid_output_fail_closed() {
 
   mkdir -p "$review_dir/repo" "$invalid_dir/repo"
   write_stubs "$review_dir/bin" 50
-  write_ai_stub "$review_dir/bin" review "$review_dir/llm"
+  write_ai_stub "$review_dir/bin" review "$review_dir/codex"
   init_ai_workflow_repo "$review_dir/repo"
 
   output=$(cd "$review_dir/repo" && PATH="$review_dir/bin:$PATH" XDG_CACHE_HOME="$review_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TERM=dumb "$SCRIPT" -u)
@@ -835,7 +1118,7 @@ test_ai_review_and_invalid_output_fail_closed() {
     fail "AI review decision should explain why the update was skipped"
 
   write_stubs "$invalid_dir/bin" 50
-  write_ai_stub "$invalid_dir/bin" invalid "$invalid_dir/llm"
+  write_ai_stub "$invalid_dir/bin" invalid "$invalid_dir/codex"
   init_ai_workflow_repo "$invalid_dir/repo"
 
   (cd "$invalid_dir/repo" && PATH="$invalid_dir/bin:$PATH" XDG_CACHE_HOME="$invalid_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
@@ -854,12 +1137,12 @@ test_ai_config_adds_investigation_to_pr_body() {
 
   mkdir -p "$repo" "$config_dir"
   write_stubs "$bin_dir" 50 "$pr_log"
-  write_ai_stub "$bin_dir" remediate "$case_dir/llm"
+  write_ai_stub "$bin_dir" remediate "$case_dir/codex"
   init_ai_workflow_repo "$repo"
   cat > "$config_dir/config.yaml" <<'YAML'
 ai:
   enabled: true
-  backend: llm
+  backend: codex
   model: test-model
   threshold: 80
   issue_search: auto
@@ -1310,7 +1593,8 @@ runs:
       with:
         token: example
 YAML
-  (cd "$repo" && TEST_SHA_NO_RELEASE=true TEST_SHA_UNTAGGED=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -u >/dev/null)
+  (cd "$repo" && TEST_SHA_NO_RELEASE=true TEST_SHA_UNTAGGED=true PATH="$bin_dir:$PATH" \
+    XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=false "$SCRIPT" -u -f >/dev/null)
   [[ "$(yq '.runs.steps[0].uses' "$repo/.github/actions/helper/action.yml")" == actions/checkout/helper@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] || fail "default branch SHA update must preserve action subpath"
   [[ "$(yq '.runs.steps[0].with.token' "$repo/.github/actions/helper/action.yml")" == example ]] || fail "SHA update must preserve inputs"
   output=$(cd "$repo" && TEST_SHA_NO_RELEASE=true PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" "$SCRIPT" -o json)
@@ -1704,11 +1988,23 @@ test_pr_body_dedupes_repeated_action_updates() {
 
 write_ai_proposal_stub() {
   local bindir="$1"
-  cat > "$bindir/llm" <<'LLM'
+  cat > "$bindir/codex" <<'CODEX'
 #!/usr/bin/env bash
 set -euo pipefail
 prompt=$(cat)
-line=$(jq -r '.local_usages[0].action_lines[0]' <<< "$prompt")
+evidence=${prompt#*'<evidence_json>'}
+evidence=${evidence%%'</evidence_json>'*}
+evidence=${evidence#$'\n'}
+evidence=${evidence%$'\n'}
+output_file=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o|--output-last-message) output_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$output_file" ]] || exit 2
+line=$(jq -r '.local_usages[0].action_lines[0]' <<< "$evidence")
 if [[ -n "${TEST_TARGET_PATH:-}" ]]; then
   line=$(AI_TEST_PATH="$TEST_TARGET_PATH" yq -r '.. | select(tag == "!!map" and has("uses")) | select(.uses == strenv(AI_TEST_PATH)) | (.uses | line)' .github/workflows/build.yml)
 fi
@@ -1718,9 +2014,9 @@ jq -cn --argjson line "$line" --arg input "$TEST_INPUT" \
   findings: [{caution_detail: "Input changed", safety: "Apply the proposed input", evidence: "action_definition"}],
   remediations: [{file: ".github/workflows/build.yml", line: $line, input: $input,
     operation: "set", current_value: $current, new_value: $new, reason: "Test proposal"}]
-}'
-LLM
-  chmod +x "$bindir/llm"
+}' > "$output_file"
+CODEX
+  chmod +x "$bindir/codex"
 }
 
 test_ai_redaction_variants() {
@@ -1728,7 +2024,7 @@ test_ai_redaction_variants() {
   local repo="$case_dir/repo" name
   mkdir -p "$repo"
   write_stubs "$case_dir/bin" 50
-  write_ai_stub "$case_dir/bin" allow "$case_dir/llm"
+  write_ai_stub "$case_dir/bin" allow "$case_dir/codex"
   init_ai_workflow_repo "$repo"
   yq -i '.jobs.build.steps[0].env.LOCAL = "PRIVATE_ENV_MARKER" |
     .jobs.build.steps[0].with.token = "PRIVATE_LITERAL_MARKER" |
@@ -1747,8 +2043,8 @@ test_ai_redaction_variants() {
     TEST_NAME="$name" TEST_EXPRESSION="$TEST_EXPRESSION" yq -i '.jobs.build.steps[0].with[strenv(TEST_NAME)] = strenv(TEST_EXPRESSION)' "$repo/.github/workflows/build.yml"
   done
   (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
-  ! grep -q 'PRIVATE_\|CHECKOUT_TOKEN\|TOP_SECRET_MARKER' "$case_dir/llm.prompt" || fail "secret redaction variants leaked into the prompt"
-  jq -e '.local_usages[0].document.jobs.build.steps[0] | .env.LOCAL == "<redacted>" and .with.token == "<redacted>" and .with.githubToken == "<redacted>" and .with.context == "<redacted>" and .with["fetch-depth"] == 0' "$case_dir/llm.prompt" >/dev/null || fail "env and with must be independently redacted while preserving safe inputs"
+  ! grep -q 'PRIVATE_\|CHECKOUT_TOKEN\|TOP_SECRET_MARKER' "$case_dir/codex.prompt" || fail "secret redaction variants leaked into the prompt"
+  jq -e '.local_usages[0].document.jobs.build.steps[0] | .env.LOCAL == "<redacted>" and .with.token == "<redacted>" and .with.githubToken == "<redacted>" and .with.context == "<redacted>" and .with["fetch-depth"] == 0' "$case_dir/codex.prompt" >/dev/null || fail "env and with must be independently redacted while preserving safe inputs"
 }
 
 test_ai_threshold_policy() {
@@ -1757,14 +2053,14 @@ test_ai_threshold_policy() {
     case_dir="$TMP_ROOT/ai-threshold-$threshold-$score-$force"
     mkdir -p "$case_dir/repo"
     write_stubs "$case_dir/bin" "$score"
-    write_ai_stub "$case_dir/bin" allow "$case_dir/llm"
+    write_ai_stub "$case_dir/bin" allow "$case_dir/codex"
     init_workflow_repo "$case_dir/repo"
     output=$(cd "$case_dir/repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model ACTIONS_SNITCH_AI_THRESHOLD="$threshold" "$SCRIPT" -u ${force:+-f})
     [[ "$(workflow_ref "$case_dir/repo")" == *"actions/checkout@v$expected"* ]] || fail "incorrect update gate for threshold $threshold and score $score"
     if [[ "$invoked" == yes ]]; then
-      [[ -f "$case_dir/llm.prompt" ]] || fail "AI was not invoked at decimal threshold $threshold"
+      [[ -f "$case_dir/codex.prompt" ]] || fail "AI was not invoked at decimal threshold $threshold"
     else
-      [[ ! -f "$case_dir/llm.prompt" ]] || fail "AI was invoked outside threshold $threshold"
+      [[ ! -f "$case_dir/codex.prompt" ]] || fail "AI was invoked outside threshold $threshold"
     fi
     [[ "$output" != *"value too great for base"* ]] || fail "threshold was parsed as octal"
   done <<'CASES'
@@ -1776,6 +2072,8 @@ test_ai_threshold_policy() {
 100 90 4 yes
 80 80 4 no
 50 70 4 no force
+80 50 4 no force
+80 Unknown 4 no force
 CASES
   for threshold in 101 999999999999999999999999999999999 08x; do
     if (cd "$case_dir/repo" && PATH="$case_dir/bin:$PATH" ACTIONS_SNITCH_AI_THRESHOLD="$threshold" "$SCRIPT" -u >/dev/null 2>&1); then
@@ -1825,7 +2123,7 @@ test_ai_missing_required_evidence() {
     repo="$case_dir/repo"
     mkdir -p "$repo"
     write_stubs "$case_dir/bin" 50
-    write_ai_stub "$case_dir/bin" allow "$case_dir/llm"
+    write_ai_stub "$case_dir/bin" allow "$case_dir/codex"
     init_ai_workflow_repo "$repo"
     if [[ "$variant" == *definition ]]; then
       mv "$case_dir/bin/curl" "$case_dir/bin/curl-real"
@@ -1850,7 +2148,7 @@ YQ
     fi
     original=$(cat "$repo/.github/workflows/build.yml")
     (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TEST_MISSING_REF="$([[ "$variant" == current-definition ]] && echo v2 || echo v4)" TEST_REAL_YQ="$real_yq" TEST_EVIDENCE_VARIANT="$variant" "$SCRIPT" -u >/dev/null)
-    [[ ! -f "$case_dir/llm.prompt" ]] || fail "$variant should prevent model invocation"
+    [[ ! -f "$case_dir/codex.prompt" ]] || fail "$variant should prevent model invocation"
     [[ "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] || fail "$variant should prevent workflow changes"
   done
 }
@@ -1865,17 +2163,29 @@ test_ai_subpath_identity() {
     yq -i '.jobs.build.steps[0].uses = "actions/checkout/foo@v2" |
       .jobs.build.steps[1] = {"uses": "actions/checkout/bar@v2", "with": {"fetch-depth": 0}}' "$repo/.github/workflows/build.yml"
     if [[ "$mode" == assess ]]; then
-      cat > "$case_dir/$mode/bin/llm" <<'LLM'
+      cat > "$case_dir/$mode/bin/codex" <<'CODEX'
 #!/usr/bin/env bash
 set -euo pipefail
 prompt=$(cat)
-printf '%s\n' "$prompt" >> "$TEST_PROMPTS"
-jq -cn --arg path "$(jq -r '.upgrade.action_path' <<< "$prompt")" '{
+evidence=${prompt#*'<evidence_json>'}
+evidence=${evidence%%'</evidence_json>'*}
+evidence=${evidence#$'\n'}
+evidence=${evidence%$'\n'}
+printf '%s\n' "$evidence" >> "$TEST_PROMPTS"
+output_file=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o|--output-last-message) output_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$output_file" ]] || exit 2
+jq -cn --arg path "$(jq -r '.upgrade.action_path' <<< "$evidence")" '{
   decision: "allow", confidence: "high", summary: $path,
   findings: [{caution_detail: $path, safety: "Path-specific assessment", evidence: "action_definition"}], remediations: []
-}'
-LLM
-      chmod +x "$case_dir/$mode/bin/llm"
+}' > "$output_file"
+CODEX
+      chmod +x "$case_dir/$mode/bin/codex"
       git -C "$repo" add .
       git -C "$repo" commit -qm 'Add subactions'
       git init --bare -q "$case_dir/$mode/origin.git"
@@ -1891,7 +2201,7 @@ LLM
       original=$(cat "$repo/.github/workflows/build.yml")
       # Always propose the other path's line so neither assessment can authorize it.
       # shellcheck disable=SC2016
-      sed -i '/line=$(jq/a TEST_TARGET_PATH=$(jq -r '\''if .upgrade.action_path | endswith("/foo") then "actions/checkout/bar@v2" else "actions/checkout/foo@v2" end'\'' <<< "$prompt")' "$case_dir/$mode/bin/llm"
+      sed -i '/line=$(jq/a TEST_TARGET_PATH=$(jq -r '\''if .upgrade.action_path | endswith("/foo") then "actions/checkout/bar@v2" else "actions/checkout/foo@v2" end'\'' <<< "$evidence")' "$case_dir/$mode/bin/codex"
       (cd "$repo" && PATH="$case_dir/$mode/bin:$PATH" XDG_CACHE_HOME="$case_dir/$mode/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TEST_INPUT=fetch-depth TEST_CURRENT=0 TEST_NEW=1 "$SCRIPT" -u >/dev/null)
       [[ "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] || fail "cross-subaction remediation must be rejected"
     fi
@@ -1902,23 +2212,34 @@ test_interactive_config_setup() {
   local case_dir="$TMP_ROOT/config-setup"
   local config_file="$case_dir/xdg/actions-snitch/config.yaml"
   local custom_file="$case_dir/custom/settings.yaml"
+  local picker_file="$case_dir/picker/settings.yaml"
   local model='provider/model: "quoted" # literal \\ value'
   local cmd output original
 
   mkdir -p "$case_dir/bin"
-  for cmd in gh curl git llm; do
+  for cmd in gh curl git codex cursor-agent gemini; do
     printf '#!/usr/bin/env bash\nexit 99\n' > "$case_dir/bin/$cmd"
     chmod +x "$case_dir/bin/$cmd"
   done
+  cat > "$case_dir/bin/agy" <<'AGY'
+#!/usr/bin/env bash
+if [[ "${1:-}" == models ]]; then
+  printf '%s\t%s\n' fast-model-low 'Fast Model' deep-model-medium 'Deep Model'
+  exit 0
+fi
+exit 99
+AGY
+  chmod +x "$case_dir/bin/agy"
 
   # Setup works outside a repository, without scanning or invoking a provider.
   (cd "$case_dir" && printf '\n\n\n\n\n' | PATH="$case_dir/bin:$PATH" \
     ACTIONS_SNITCH_CONFIG="$config_file" "$SCRIPT" -c >/dev/null 2>&1)
   [[ "$(yq -r '.ai.enabled' "$config_file")" == false ]] || fail "setup should default to AI disabled"
+  [[ "$(yq -r '.ai.provider' "$config_file")" == codex ]] || fail "setup should save the detected default provider"
   [[ "$(yq -r '.ai.model' "$config_file")" == "" ]] || fail "disabled AI may omit a model"
   [[ "$(yq -r '.ai.threshold' "$config_file")" == 80 ]] || fail "setup threshold should default to 80"
   [[ "$(yq -r '.ai.issue_search' "$config_file")" == auto ]] || fail "setup issue search should default to auto"
-  [[ "$(yq -r '.ai | has("api_key_env")' "$config_file")" == false ]] || fail "setup should omit an empty credential variable"
+  [[ "$(yq -r '.ai | has("effort")' "$config_file")" == false ]] || fail "setup should omit a provider-default effort"
   [[ "$(LC_ALL=C ls -l "$config_file")" == -rw-------* ]] || fail "config should have owner-only permissions"
 
   original=$(cat "$config_file")
@@ -1928,26 +2249,45 @@ test_interactive_config_setup() {
   [[ "$(cat "$config_file")" == "$original" ]] || fail "setup overwrote existing settings"
 
   # Invalid answers must reprompt; model punctuation must survive YAML encoding.
-  output=$(printf '%s\n' maybe yes '' "$model" -1 101 2.5 008 always-no never 'not-a-variable' MODEL_API_KEY |
-    ACTIONS_SNITCH_CONFIG="$custom_file" XDG_CONFIG_HOME="$case_dir/unused" "$SCRIPT" -c 2>&1)
+  output=$(printf '%s\n' maybe yes gemini '' "$model" -1 101 2.5 008 always-no never |
+    PATH="$case_dir/bin:$PATH" ACTIONS_SNITCH_CONFIG="$custom_file" \
+    XDG_CONFIG_HOME="$case_dir/unused" "$SCRIPT" -c 2>&1)
   [[ "$output" == *'Enter yes or no.'* && "$output" == *'Enter a model ID'* ]] || fail "setup should validate enabled and model answers"
+  [[ "$output" == *'Detected AI providers:'* && "$output" == *'codex'* &&
+     "$output" == *'cursor'* && "$output" == *'gemini'* ]] ||
+    fail "setup should display detected provider CLIs"
   [[ "$output" == *'Enter an integer from 0 to 100.'* && "$output" == *'Enter auto, always, or never.'* ]] || fail "setup should validate threshold and issue search"
-  [[ "$output" == *'Enter an environment variable name'* ]] || fail "setup should validate credential names"
   [[ "$(yq -r '.ai.enabled' "$custom_file")" == true ]] || fail "setup should enable AI when requested"
+  [[ "$(yq -r '.ai.provider' "$custom_file")" == gemini ]] || fail "setup should save the selected detected provider"
   [[ "$(yq -r '.ai.model' "$custom_file")" == "$model" ]] || fail "setup should preserve model strings"
   [[ "$(yq -r '.ai.threshold' "$custom_file")" == 8 ]] || fail "setup should normalize decimal thresholds"
   [[ "$(yq -r '.ai.issue_search' "$custom_file")" == never ]] || fail "setup should save the issue search selection"
-  [[ "$(yq -r '.ai.api_key_env' "$custom_file")" == MODEL_API_KEY ]] || fail "setup should save the credential variable name"
   [[ ! -e "$case_dir/unused" ]] || fail "explicit config path should override XDG_CONFIG_HOME"
 
-  (unset ACTIONS_SNITCH_CONFIG; printf '\n\n0\nalways\n\n' |
+  output=$(printf '%s\n' yes antigravity 0002 '' '' |
+    PATH="$case_dir/bin:$PATH" ACTIONS_SNITCH_CONFIG="$picker_file" "$SCRIPT" -c 2>&1)
+  [[ "$output" == *'Available model choices:'* ]] ||
+    fail "setup should show models listed by the provider"
+  [[ "$output" != *'Available effort choices:'* ]] ||
+    fail "Antigravity must skip the effort picker because its model IDs encode effort"
+  [[ "$(yq -r '.ai.provider' "$picker_file")" == antigravity ]] || fail "picker should save the selected provider"
+  [[ "$(yq -r '.ai.model' "$picker_file")" == deep-model-medium ]] || fail "picker should save the selected provider model"
+  [[ "$(yq -r '.ai | has("effort")' "$picker_file")" == false ]] ||
+    fail "Antigravity setup must preserve the selected model's effort without an override"
+  if ACTIONS_SNITCH_CONFIG="$picker_file" ACTIONS_SNITCH_AI_EFFORT=high "$SCRIPT" -u >"$case_dir/effort-error" 2>&1; then
+    fail "setup must not accept an effort that conflicts with a pinned Antigravity model"
+  fi
+  grep -q 'conflicts with the pinned effort' "$case_dir/effort-error" ||
+    fail "an Antigravity effort mismatch must explain the model constraint"
+
+  (unset ACTIONS_SNITCH_CONFIG; printf '\n\n\n0\nalways\n' |
     XDG_CONFIG_HOME="$case_dir/alternate" "$SCRIPT" -c >/dev/null 2>&1)
   [[ -f "$case_dir/alternate/actions-snitch/config.yaml" ]] || fail "setup should respect XDG_CONFIG_HOME"
-  (unset ACTIONS_SNITCH_CONFIG XDG_CONFIG_HOME; printf '\n\n100\n\n\n' |
+  (unset ACTIONS_SNITCH_CONFIG XDG_CONFIG_HOME; printf '\n\n\n100\n\n' |
     HOME="$case_dir/home" "$SCRIPT" -c >/dev/null 2>&1)
   [[ -f "$case_dir/home/.config/actions-snitch/config.yaml" ]] || fail "setup should default to HOME/.config"
 
-  if printf 'yes\ntest-model\n' | ACTIONS_SNITCH_CONFIG="$case_dir/cancelled.yaml" "$SCRIPT" -c >/dev/null 2>&1; then
+  if printf 'yes\ncodex\ntest-model\n' | ACTIONS_SNITCH_CONFIG="$case_dir/cancelled.yaml" "$SCRIPT" -c >/dev/null 2>&1; then
     fail "setup should fail on incomplete input"
   fi
   [[ ! -e "$case_dir/cancelled.yaml" ]] || fail "cancelled setup should not write a config"
@@ -1969,6 +2309,11 @@ test_option_validation
 test_update_in_place
 test_update_branch_creation
 test_force_gate
+test_force_bypasses_ai
+test_antigravity_max_effort
+test_unknown_compatibility_gate
+test_ai_provider_adapters
+test_large_ai_provider_prompts
 test_ai_allows_low_score_update_and_redacts_context
 test_ai_review_and_invalid_output_fail_closed
 test_ai_rejects_unsafe_remediation
