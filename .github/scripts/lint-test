@@ -138,22 +138,38 @@ CURL
 write_ai_stub() {
   local bindir="$1"
   local decision="$2"
-  local llm_log="$3"
+  local codex_log="$3"
 
-  cat > "$bindir/llm" <<LLM
+  cat > "$bindir/codex" <<CODEX
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf '%s\\n' "\$*" > "${llm_log}.args"
+printf '%s\\n' "\$*" > "${codex_log}.args"
 prompt=\$(cat)
-printf '%s' "\$prompt" > "${llm_log}.prompt"
+evidence=\${prompt#*'<evidence_json>'}
+evidence=\${evidence%%'</evidence_json>'*}
+evidence=\${evidence#\$'\\n'}
+evidence=\${evidence%\$'\\n'}
+printf '%s' "\$evidence" > "${codex_log}.prompt"
+
+output_file=""
+while (( \$# > 0 )); do
+  case "\$1" in
+    -o|--output-last-message)
+      output_file="\$2"
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+[[ -n "\$output_file" ]] || exit 2
 
 case "$decision" in
   invalid)
-    printf 'not-json\\n'
+    printf 'not-json\\n' > "\$output_file"
     ;;
   remediate)
-    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$prompt")
+    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$evidence")
     jq -cn --argjson line "\$line" '{
       decision: "allow",
       confidence: "high",
@@ -183,10 +199,10 @@ case "$decision" in
           reason: "The proposed version should use its new clean default."
         }
       ]
-    }'
+    }' > "\$output_file"
     ;;
   unsafe-remediation)
-    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$prompt")
+    line=\$(jq -r '.local_usages[0].action_lines[0]' <<< "\$evidence")
     jq -cn --argjson line "\$line" '{
       decision: "allow",
       confidence: "high",
@@ -216,15 +232,15 @@ case "$decision" in
           reason: "This must be rejected as a sensitive input."
         }
       ]
-    }'
+    }' > "\$output_file"
     ;;
   *)
-    printf '%s\\n' '{"decision":"$decision","confidence":"high","summary":"The observed checkout configuration is compatible with v4.","findings":[{"caution_detail":"Checkout token handling changed.","safety":"The workflow uses an explicit token and remains compatible.","evidence":"release_notes"}],"remediations":[]}'
+    printf '%s\\n' '{"decision":"$decision","confidence":"high","summary":"The observed checkout configuration is compatible with v4.","findings":[{"caution_detail":"Checkout token handling changed.","safety":"The workflow uses an explicit token and remains compatible.","evidence":"release_notes"}],"remediations":[]}' > "\$output_file"
     ;;
 esac
-LLM
+CODEX
 
-  chmod +x "$bindir/llm"
+  chmod +x "$bindir/codex"
 }
 
 write_multi_action_stubs() {
@@ -771,22 +787,24 @@ test_ai_allows_low_score_update_and_redacts_context() {
   local case_dir="$TMP_ROOT/ai-allow"
   local bin_dir="$case_dir/bin"
   local repo="$case_dir/repo"
-  local llm_log="$case_dir/llm"
+  local codex_log="$case_dir/codex"
   local args prompt
 
   mkdir -p "$repo"
   write_stubs "$bin_dir" 50
-  write_ai_stub "$bin_dir" allow "$llm_log"
+  write_ai_stub "$bin_dir" allow "$codex_log"
   init_ai_workflow_repo "$repo"
 
   (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
 
   [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
     fail "AI allow decision should apply a low compatibility update"
-  args=$(cat "${llm_log}.args")
-  [[ "$args" == *"--no-log"* && "$args" == *"--schema"* && "$args" == *"--model test-model"* ]] ||
-    fail "AI invocation should disable logging and request schema-constrained output"
-  prompt=$(cat "${llm_log}.prompt")
+  args=$(cat "${codex_log}.args")
+  [[ "$args" == *"exec"* && "$args" == *"--ephemeral"* && "$args" == *"--ignore-user-config"* &&
+     "$args" == *"--sandbox read-only"* && "$args" == *"--output-schema"* &&
+     "$args" == *"--output-last-message"* && "$args" == *"--model test-model"* ]] ||
+    fail "AI invocation should use an ephemeral, read-only Codex session with schema-constrained output"
+  prompt=$(cat "${codex_log}.prompt")
   [[ "$prompt" == *'"fetch-depth":0'* ]] ||
     fail "AI evidence should include the action's exact input configuration"
   [[ "$prompt" == *'"action_lines":['* ]] ||
@@ -805,7 +823,7 @@ test_ai_rejects_unsafe_remediation() {
 
   mkdir -p "$repo"
   write_stubs "$bin_dir" 50
-  write_ai_stub "$bin_dir" unsafe-remediation "$case_dir/llm"
+  write_ai_stub "$bin_dir" unsafe-remediation "$case_dir/codex"
   init_ai_workflow_repo "$repo"
 
   output=$(cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TERM=dumb "$SCRIPT" -u)
@@ -825,7 +843,7 @@ test_ai_review_and_invalid_output_fail_closed() {
 
   mkdir -p "$review_dir/repo" "$invalid_dir/repo"
   write_stubs "$review_dir/bin" 50
-  write_ai_stub "$review_dir/bin" review "$review_dir/llm"
+  write_ai_stub "$review_dir/bin" review "$review_dir/codex"
   init_ai_workflow_repo "$review_dir/repo"
 
   output=$(cd "$review_dir/repo" && PATH="$review_dir/bin:$PATH" XDG_CACHE_HOME="$review_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TERM=dumb "$SCRIPT" -u)
@@ -835,7 +853,7 @@ test_ai_review_and_invalid_output_fail_closed() {
     fail "AI review decision should explain why the update was skipped"
 
   write_stubs "$invalid_dir/bin" 50
-  write_ai_stub "$invalid_dir/bin" invalid "$invalid_dir/llm"
+  write_ai_stub "$invalid_dir/bin" invalid "$invalid_dir/codex"
   init_ai_workflow_repo "$invalid_dir/repo"
 
   (cd "$invalid_dir/repo" && PATH="$invalid_dir/bin:$PATH" XDG_CACHE_HOME="$invalid_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
@@ -854,12 +872,12 @@ test_ai_config_adds_investigation_to_pr_body() {
 
   mkdir -p "$repo" "$config_dir"
   write_stubs "$bin_dir" 50 "$pr_log"
-  write_ai_stub "$bin_dir" remediate "$case_dir/llm"
+  write_ai_stub "$bin_dir" remediate "$case_dir/codex"
   init_ai_workflow_repo "$repo"
   cat > "$config_dir/config.yaml" <<'YAML'
 ai:
   enabled: true
-  backend: llm
+  backend: codex
   model: test-model
   threshold: 80
   issue_search: auto
@@ -1704,11 +1722,23 @@ test_pr_body_dedupes_repeated_action_updates() {
 
 write_ai_proposal_stub() {
   local bindir="$1"
-  cat > "$bindir/llm" <<'LLM'
+  cat > "$bindir/codex" <<'CODEX'
 #!/usr/bin/env bash
 set -euo pipefail
 prompt=$(cat)
-line=$(jq -r '.local_usages[0].action_lines[0]' <<< "$prompt")
+evidence=${prompt#*'<evidence_json>'}
+evidence=${evidence%%'</evidence_json>'*}
+evidence=${evidence#$'\n'}
+evidence=${evidence%$'\n'}
+output_file=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o|--output-last-message) output_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$output_file" ]] || exit 2
+line=$(jq -r '.local_usages[0].action_lines[0]' <<< "$evidence")
 if [[ -n "${TEST_TARGET_PATH:-}" ]]; then
   line=$(AI_TEST_PATH="$TEST_TARGET_PATH" yq -r '.. | select(tag == "!!map" and has("uses")) | select(.uses == strenv(AI_TEST_PATH)) | (.uses | line)' .github/workflows/build.yml)
 fi
@@ -1718,9 +1748,9 @@ jq -cn --argjson line "$line" --arg input "$TEST_INPUT" \
   findings: [{caution_detail: "Input changed", safety: "Apply the proposed input", evidence: "action_definition"}],
   remediations: [{file: ".github/workflows/build.yml", line: $line, input: $input,
     operation: "set", current_value: $current, new_value: $new, reason: "Test proposal"}]
-}'
-LLM
-  chmod +x "$bindir/llm"
+}' > "$output_file"
+CODEX
+  chmod +x "$bindir/codex"
 }
 
 test_ai_redaction_variants() {
@@ -1728,7 +1758,7 @@ test_ai_redaction_variants() {
   local repo="$case_dir/repo" name
   mkdir -p "$repo"
   write_stubs "$case_dir/bin" 50
-  write_ai_stub "$case_dir/bin" allow "$case_dir/llm"
+  write_ai_stub "$case_dir/bin" allow "$case_dir/codex"
   init_ai_workflow_repo "$repo"
   yq -i '.jobs.build.steps[0].env.LOCAL = "PRIVATE_ENV_MARKER" |
     .jobs.build.steps[0].with.token = "PRIVATE_LITERAL_MARKER" |
@@ -1747,8 +1777,8 @@ test_ai_redaction_variants() {
     TEST_NAME="$name" TEST_EXPRESSION="$TEST_EXPRESSION" yq -i '.jobs.build.steps[0].with[strenv(TEST_NAME)] = strenv(TEST_EXPRESSION)' "$repo/.github/workflows/build.yml"
   done
   (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
-  ! grep -q 'PRIVATE_\|CHECKOUT_TOKEN\|TOP_SECRET_MARKER' "$case_dir/llm.prompt" || fail "secret redaction variants leaked into the prompt"
-  jq -e '.local_usages[0].document.jobs.build.steps[0] | .env.LOCAL == "<redacted>" and .with.token == "<redacted>" and .with.githubToken == "<redacted>" and .with.context == "<redacted>" and .with["fetch-depth"] == 0' "$case_dir/llm.prompt" >/dev/null || fail "env and with must be independently redacted while preserving safe inputs"
+  ! grep -q 'PRIVATE_\|CHECKOUT_TOKEN\|TOP_SECRET_MARKER' "$case_dir/codex.prompt" || fail "secret redaction variants leaked into the prompt"
+  jq -e '.local_usages[0].document.jobs.build.steps[0] | .env.LOCAL == "<redacted>" and .with.token == "<redacted>" and .with.githubToken == "<redacted>" and .with.context == "<redacted>" and .with["fetch-depth"] == 0' "$case_dir/codex.prompt" >/dev/null || fail "env and with must be independently redacted while preserving safe inputs"
 }
 
 test_ai_threshold_policy() {
@@ -1757,14 +1787,14 @@ test_ai_threshold_policy() {
     case_dir="$TMP_ROOT/ai-threshold-$threshold-$score-$force"
     mkdir -p "$case_dir/repo"
     write_stubs "$case_dir/bin" "$score"
-    write_ai_stub "$case_dir/bin" allow "$case_dir/llm"
+    write_ai_stub "$case_dir/bin" allow "$case_dir/codex"
     init_workflow_repo "$case_dir/repo"
     output=$(cd "$case_dir/repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model ACTIONS_SNITCH_AI_THRESHOLD="$threshold" "$SCRIPT" -u ${force:+-f})
     [[ "$(workflow_ref "$case_dir/repo")" == *"actions/checkout@v$expected"* ]] || fail "incorrect update gate for threshold $threshold and score $score"
     if [[ "$invoked" == yes ]]; then
-      [[ -f "$case_dir/llm.prompt" ]] || fail "AI was not invoked at decimal threshold $threshold"
+      [[ -f "$case_dir/codex.prompt" ]] || fail "AI was not invoked at decimal threshold $threshold"
     else
-      [[ ! -f "$case_dir/llm.prompt" ]] || fail "AI was invoked outside threshold $threshold"
+      [[ ! -f "$case_dir/codex.prompt" ]] || fail "AI was invoked outside threshold $threshold"
     fi
     [[ "$output" != *"value too great for base"* ]] || fail "threshold was parsed as octal"
   done <<'CASES'
@@ -1825,7 +1855,7 @@ test_ai_missing_required_evidence() {
     repo="$case_dir/repo"
     mkdir -p "$repo"
     write_stubs "$case_dir/bin" 50
-    write_ai_stub "$case_dir/bin" allow "$case_dir/llm"
+    write_ai_stub "$case_dir/bin" allow "$case_dir/codex"
     init_ai_workflow_repo "$repo"
     if [[ "$variant" == *definition ]]; then
       mv "$case_dir/bin/curl" "$case_dir/bin/curl-real"
@@ -1850,7 +1880,7 @@ YQ
     fi
     original=$(cat "$repo/.github/workflows/build.yml")
     (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TEST_MISSING_REF="$([[ "$variant" == current-definition ]] && echo v2 || echo v4)" TEST_REAL_YQ="$real_yq" TEST_EVIDENCE_VARIANT="$variant" "$SCRIPT" -u >/dev/null)
-    [[ ! -f "$case_dir/llm.prompt" ]] || fail "$variant should prevent model invocation"
+    [[ ! -f "$case_dir/codex.prompt" ]] || fail "$variant should prevent model invocation"
     [[ "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] || fail "$variant should prevent workflow changes"
   done
 }
@@ -1865,17 +1895,29 @@ test_ai_subpath_identity() {
     yq -i '.jobs.build.steps[0].uses = "actions/checkout/foo@v2" |
       .jobs.build.steps[1] = {"uses": "actions/checkout/bar@v2", "with": {"fetch-depth": 0}}' "$repo/.github/workflows/build.yml"
     if [[ "$mode" == assess ]]; then
-      cat > "$case_dir/$mode/bin/llm" <<'LLM'
+      cat > "$case_dir/$mode/bin/codex" <<'CODEX'
 #!/usr/bin/env bash
 set -euo pipefail
 prompt=$(cat)
-printf '%s\n' "$prompt" >> "$TEST_PROMPTS"
-jq -cn --arg path "$(jq -r '.upgrade.action_path' <<< "$prompt")" '{
+evidence=${prompt#*'<evidence_json>'}
+evidence=${evidence%%'</evidence_json>'*}
+evidence=${evidence#$'\n'}
+evidence=${evidence%$'\n'}
+printf '%s\n' "$evidence" >> "$TEST_PROMPTS"
+output_file=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o|--output-last-message) output_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$output_file" ]] || exit 2
+jq -cn --arg path "$(jq -r '.upgrade.action_path' <<< "$evidence")" '{
   decision: "allow", confidence: "high", summary: $path,
   findings: [{caution_detail: $path, safety: "Path-specific assessment", evidence: "action_definition"}], remediations: []
-}'
-LLM
-      chmod +x "$case_dir/$mode/bin/llm"
+}' > "$output_file"
+CODEX
+      chmod +x "$case_dir/$mode/bin/codex"
       git -C "$repo" add .
       git -C "$repo" commit -qm 'Add subactions'
       git init --bare -q "$case_dir/$mode/origin.git"
@@ -1891,7 +1933,7 @@ LLM
       original=$(cat "$repo/.github/workflows/build.yml")
       # Always propose the other path's line so neither assessment can authorize it.
       # shellcheck disable=SC2016
-      sed -i '/line=$(jq/a TEST_TARGET_PATH=$(jq -r '\''if .upgrade.action_path | endswith("/foo") then "actions/checkout/bar@v2" else "actions/checkout/foo@v2" end'\'' <<< "$prompt")' "$case_dir/$mode/bin/llm"
+      sed -i '/line=$(jq/a TEST_TARGET_PATH=$(jq -r '\''if .upgrade.action_path | endswith("/foo") then "actions/checkout/bar@v2" else "actions/checkout/foo@v2" end'\'' <<< "$evidence")' "$case_dir/$mode/bin/codex"
       (cd "$repo" && PATH="$case_dir/$mode/bin:$PATH" XDG_CACHE_HOME="$case_dir/$mode/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TEST_INPUT=fetch-depth TEST_CURRENT=0 TEST_NEW=1 "$SCRIPT" -u >/dev/null)
       [[ "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] || fail "cross-subaction remediation must be rejected"
     fi
@@ -1906,7 +1948,7 @@ test_interactive_config_setup() {
   local cmd output original
 
   mkdir -p "$case_dir/bin"
-  for cmd in gh curl git llm; do
+  for cmd in gh curl git codex; do
     printf '#!/usr/bin/env bash\nexit 99\n' > "$case_dir/bin/$cmd"
     chmod +x "$case_dir/bin/$cmd"
   done
@@ -1915,10 +1957,10 @@ test_interactive_config_setup() {
   (cd "$case_dir" && printf '\n\n\n\n\n' | PATH="$case_dir/bin:$PATH" \
     ACTIONS_SNITCH_CONFIG="$config_file" "$SCRIPT" -c >/dev/null 2>&1)
   [[ "$(yq -r '.ai.enabled' "$config_file")" == false ]] || fail "setup should default to AI disabled"
+  [[ "$(yq -r '.ai.backend' "$config_file")" == codex ]] || fail "setup should configure the Codex backend"
   [[ "$(yq -r '.ai.model' "$config_file")" == "" ]] || fail "disabled AI may omit a model"
   [[ "$(yq -r '.ai.threshold' "$config_file")" == 80 ]] || fail "setup threshold should default to 80"
   [[ "$(yq -r '.ai.issue_search' "$config_file")" == auto ]] || fail "setup issue search should default to auto"
-  [[ "$(yq -r '.ai | has("api_key_env")' "$config_file")" == false ]] || fail "setup should omit an empty credential variable"
   [[ "$(LC_ALL=C ls -l "$config_file")" == -rw-------* ]] || fail "config should have owner-only permissions"
 
   original=$(cat "$config_file")
@@ -1928,16 +1970,14 @@ test_interactive_config_setup() {
   [[ "$(cat "$config_file")" == "$original" ]] || fail "setup overwrote existing settings"
 
   # Invalid answers must reprompt; model punctuation must survive YAML encoding.
-  output=$(printf '%s\n' maybe yes '' "$model" -1 101 2.5 008 always-no never 'not-a-variable' MODEL_API_KEY |
+  output=$(printf '%s\n' maybe yes '' "$model" -1 101 2.5 008 always-no never |
     ACTIONS_SNITCH_CONFIG="$custom_file" XDG_CONFIG_HOME="$case_dir/unused" "$SCRIPT" -c 2>&1)
   [[ "$output" == *'Enter yes or no.'* && "$output" == *'Enter a model ID'* ]] || fail "setup should validate enabled and model answers"
   [[ "$output" == *'Enter an integer from 0 to 100.'* && "$output" == *'Enter auto, always, or never.'* ]] || fail "setup should validate threshold and issue search"
-  [[ "$output" == *'Enter an environment variable name'* ]] || fail "setup should validate credential names"
   [[ "$(yq -r '.ai.enabled' "$custom_file")" == true ]] || fail "setup should enable AI when requested"
   [[ "$(yq -r '.ai.model' "$custom_file")" == "$model" ]] || fail "setup should preserve model strings"
   [[ "$(yq -r '.ai.threshold' "$custom_file")" == 8 ]] || fail "setup should normalize decimal thresholds"
   [[ "$(yq -r '.ai.issue_search' "$custom_file")" == never ]] || fail "setup should save the issue search selection"
-  [[ "$(yq -r '.ai.api_key_env' "$custom_file")" == MODEL_API_KEY ]] || fail "setup should save the credential variable name"
   [[ ! -e "$case_dir/unused" ]] || fail "explicit config path should override XDG_CONFIG_HOME"
 
   (unset ACTIONS_SNITCH_CONFIG; printf '\n\n0\nalways\n\n' |

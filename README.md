@@ -12,7 +12,7 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 - 🚀 Shows compatibility scores between versions
 - 💾 Caches API responses for faster subsequent runs (24h TTL)
 - 🔄 Can automatically create PRs to update actions
-- 🤖 Can ask an optional, provider-neutral LLM to investigate low compatibility scores before updating
+- 🤖 Can ask an optional authenticated Codex session to investigate low compatibility scores before updating
 - ☑️ Indicates GitHub Marketplace verified creators
 - 🎨 Cute color-coded output with status badges
 - 🏃 Fast local execution
@@ -26,7 +26,7 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 - `curl`
 - `git`
 
-AI-assisted updates additionally require Simon Willison's [`llm` CLI](https://llm.datasette.io/en/stable/setup.html) and a schema-capable model. Provider plugins are listed in the [`llm` plugin directory](https://llm.datasette.io/en/stable/plugins/directory.html).
+AI-assisted updates additionally require an authenticated [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) session and a model that supports structured output.
 
 ## Installation
 
@@ -128,7 +128,7 @@ Run the interactive setup:
 actions-snitch -c
 ```
 
-It asks whether to enable AI, which model to use, the compatibility threshold, upstream issue search policy, and an optional credential environment variable name. Use `llm models list` to find your model ID. AI stays disabled by default.
+It asks whether to enable AI, which Codex model to use, the compatibility threshold, and the upstream issue search policy. AI stays disabled by default.
 
 Setup creates `~/.config/actions-snitch/config.yaml` (or `$XDG_CONFIG_HOME/actions-snitch/config.yaml`) with owner-only permissions. `ACTIONS_SNITCH_CONFIG` can select a different file. Existing files are never overwritten; edit them directly to change settings. Press Ctrl-C to cancel before writing. Setup only requires `jq` and `yq`, and does not scan or modify a repository.
 
@@ -137,18 +137,16 @@ The generated file has this shape:
 ```yaml
 ai:
   enabled: false
-  backend: llm
-  model: your-installed-model-id
+  backend: codex
+  model: your-codex-model-id
   threshold: 80
   issue_search: auto
-  # Optional: require this environment variable to be set.
-  # api_key_env: OPENAI_API_KEY
 ```
 
-Store credentials with the provider's environment variable or the `llm` key store, not in this file. For example:
+The Codex CLI uses its existing login session, so the actions-snitch configuration does not store provider credentials. Authenticate once before enabling AI:
 
 ```bash
-llm keys set openai
+codex login
 ACTIONS_SNITCH_AI=true actions-snitch -u
 ```
 
@@ -159,7 +157,7 @@ Environment variables override the corresponding defaults:
 - `ACTIONS_SNITCH_AI_THRESHOLD=0..100`
 - `ACTIONS_SNITCH_CONFIG=/path/to/config.yaml`
 
-The `llm` request uses `--no-log`, so workflow evidence is not written to its local prompt database. Redacted workflow evidence is still sent to the selected model provider; use a local model plugin when repository policy prohibits that.
+Each assessment runs through `codex exec` as an ephemeral, non-interactive session in a temporary directory. The session ignores user configuration, uses a read-only sandbox, and constrains its final response with the actions-snitch JSON schema. The request still sends redacted workflow evidence to OpenAI through the authenticated Codex session.
 
 ### Pull Request Body
 
