@@ -130,6 +130,8 @@ Markdown output links the repository heading to the `origin` remote when one is 
 
 AI analysis is opt-in and only runs during `-u` or `-p` when an action's compatibility score is below the configured threshold. The model receives redacted workflow context and both action definitions. Release notes, changelogs, compare commits, and a bounded upstream issue search provide additional evidence when available. Scores below 80 still require AI approval or `-f`; lowering the AI threshold does not permit automatic updates between that threshold and 80. Unknown or invalid compatibility scores also require AI approval or `-f`, so a missing score never authorizes an update by itself. The model must return a schema-validated `allow`, `review`, or `block` decision.
 
+For composite actions, evidence also includes up to four files per version that `run` steps reference through `github.action_path`. Each file is limited to 12,000 characters, and evidence marks missing files, truncation, and omitted files. actions-snitch reads this source without executing it.
+
 An `allow` decision may include narrowly scoped remediation for the affected action step's `with:` inputs. Before making any change, actions-snitch verifies the workflow file, exact action line and full action path, current action version, input name, and current scalar value. Sensitive inputs, arbitrary YAML patches, permissions, triggers, environment variables, shell commands, and changes outside the affected action step are rejected. All proposed input changes are validated and applied to temporary copies first, so an invalid proposal cannot partially modify the repository. Missing local usage evidence or either action definition, backend errors, and invalid responses fail closed; `-f` remains the explicit version-update override and never applies an unvalidated remediation.
 
 Forced updates with `-f` bypass AI assessment, send no workflow evidence to an AI provider, and require neither a provider CLI nor a model. They update action references without applying AI remediation.
@@ -140,7 +142,9 @@ Run the interactive setup:
 actions-snitch -c
 ```
 
-It asks whether to enable AI, which detected provider and model to use, the provider effort level when discoverable, the compatibility threshold, and the upstream issue search policy. The provider prompt lists only supported executables found on `PATH`. Cursor, OpenCode, and Antigravity expose non-interactive model lists, so setup presents numbered model choices for them. Claude and Copilot offer their documented effort levels. Antigravity model IDs encode the effort, so setup skips its effort picker and saves no separate effort override. Other providers use manual model entry and their default effort because their CLIs do not expose a reliable non-interactive catalog. AI stays disabled by default.
+It asks whether to enable AI, which detected provider and model to use, the provider effort level when discoverable, the compatibility threshold, and the upstream issue search policy. The provider prompt lists only supported executables found on `PATH`. Codex supplies its visible model IDs through `codex debug models`, and its selected model's `supported_reasoning_levels` populate the effort picker. Cursor, OpenCode, and Antigravity also expose non-interactive model lists. Claude and Copilot offer their documented effort levels. Antigravity model IDs encode the effort, so setup skips its effort picker and saves no separate effort override. Providers without a model catalog use manual model entry. AI stays disabled by default.
+
+When Codex returns a catalog, update mode checks the configured model and effort before collecting workflow evidence. Invalid IDs produce a configuration error. Assessment results also print their summary, including a failure reason when the provider could not complete the investigation.
 
 Setup creates `~/.config/actions-snitch/config.yaml` (or `$XDG_CONFIG_HOME/actions-snitch/config.yaml`) with owner-only permissions. `ACTIONS_SNITCH_CONFIG` can select a different file. Existing files are never overwritten; edit them directly to change settings. Press Ctrl-C to cancel before writing. Setup only requires `jq` and `yq`, and does not scan or modify a repository.
 
@@ -176,6 +180,14 @@ Environment variables override the corresponding defaults:
 Each assessment runs non-interactively in a temporary directory. Codex, Claude, and Antigravity receive the actions-snitch JSON schema directly. Cursor, Gemini, OpenCode, and Copilot return machine-readable envelopes, from which actions-snitch extracts and validates the final JSON response against the same schema. Every backend error, missing response, parse failure, or schema violation fails closed. The request sends redacted workflow evidence to the selected provider through its authenticated CLI session.
 
 Codex, Claude, Gemini, OpenCode, Copilot, and Antigravity receive the complete assessment prompt through stdin. The Cursor adapter requires a command argument, so prompts above 32 KiB require manual review without invoking the CLI. This limit counts bytes and preserves the complete workflow evidence.
+
+The integration suite uses stored model catalogs and promci fixtures with mocked CLI and GitHub responses. You can also test an authenticated model against the promci fixture in a temporary repository:
+
+```bash
+bash .github/scripts/test-live-ai codex gpt-6.1-sol
+```
+
+This live test uses the selected provider's credentials and may consume model usage. It checks an actual AI-approved update without `-f` and removes its temporary repository when it exits.
 
 ### Pull Request Body
 

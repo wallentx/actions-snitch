@@ -1,0 +1,29 @@
+name: Preserve workflow layout
+on: workflow_dispatch
+# The comment mentions actions/checkout@v2 and must remain unchanged.
+jobs:
+  approve:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/workflow-approve' &&
+      github.repository_owner == 'prometheus'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2 # The inline comment stays here.
+      - uses: 'actions/checkout@v2'
+      - uses: "actions/checkout@v2"
+      - uses: "actions/\u0063heckout@v2"
+      - "uses": 'actions/checkout@2'
+      - {name: "inline", uses: actions/checkout@v2}
+      - {uses: actions/checkout@v2, with: {ref: main}}
+      - uses: &checkout actions/checkout@v2
+      - uses: *checkout
+      - uses: >-
+          actions/checkout@v2
+      - uses: |-
+          actions/checkout@v2
+      - run: |
+          echo 'uses: actions/checkout@v2'
+  inline:
+    runs-on: ubuntu-latest
+    steps: [{uses: "actions/checkout@v2"}, {uses: 'actions/checkout@v2'}]

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# != 2 ]]; then
+    printf 'Usage: bash .github/scripts/test-live-ai PROVIDER MODEL\n' >&2
+    exit 1
+fi
+provider="$1"
+model="$2"
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+live_dir=$(mktemp -d "${TMPDIR:-/tmp}/actions-snitch-live-ai.XXXXXXXXXX")
+trap 'rm -rf -- "$live_dir"' EXIT
+mkdir -p "$live_dir/.github/workflows"
+cp "$repo_root/.github/scripts/fixtures/promci-approve-workflows.yml" "$live_dir/.github/workflows/approve-workflows.yml"
+git -C "$live_dir" init -q -b main
+git -C "$live_dir" config user.name fixture
+git -C "$live_dir" config user.email fixture@example.invalid
+git -C "$live_dir" add .github/workflows/approve-workflows.yml
+git -C "$live_dir" commit -qm 'The fixture contains a pinned promci usage.'
+cd "$live_dir"
+ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_PROVIDER="$provider" \
+    ACTIONS_SNITCH_AI_MODEL="$model" "$repo_root/actions-snitch" -s -u
+git diff -- .github/workflows/approve-workflows.yml
+ref=$(yq -r '.jobs.approve.steps[0].uses' .github/workflows/approve-workflows.yml)
+if [[ "$ref" == prometheus/promci/approve_workflows@370e8c15dcec50043cbe66f2f34633d9efc0a190 ]]; then
+    printf 'The live model did not approve the fixture upgrade; inspect the assessment above.\n' >&2
+    exit 1
+fi
