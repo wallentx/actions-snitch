@@ -12,7 +12,7 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 - 🚀 Shows compatibility scores between versions
 - 💾 Caches API responses for faster subsequent runs (24h TTL)
 - 🔄 Can automatically create PRs to update actions
-- 🤖 Can ask an optional authenticated Codex session to investigate low compatibility scores before updating
+- 🤖 Can ask an optional authenticated provider CLI to investigate low or unknown compatibility scores before updating
 - ☑️ Indicates GitHub Marketplace verified creators
 - 🎨 Cute color-coded output with status badges
 - 🏃 Fast local execution
@@ -138,7 +138,7 @@ Run the interactive setup:
 actions-snitch -c
 ```
 
-It asks whether to enable AI, which detected provider and model to use, the compatibility threshold, and the upstream issue search policy. The provider prompt lists only supported executables found on `PATH`. AI stays disabled by default.
+It asks whether to enable AI, which detected provider and model to use, the provider effort level when discoverable, the compatibility threshold, and the upstream issue search policy. The provider prompt lists only supported executables found on `PATH`. Cursor, OpenCode, and Antigravity expose non-interactive model lists, so setup presents numbered model choices for them. Claude and Copilot offer their documented effort levels. Antigravity model IDs that end in `-low`, `-medium`, or `-high` pin their effort, so setup offers only that level and the provider default. Other providers use manual model entry and their default effort because their CLIs do not expose a reliable non-interactive catalog. AI stays disabled by default.
 
 Setup creates `~/.config/actions-snitch/config.yaml` (or `$XDG_CONFIG_HOME/actions-snitch/config.yaml`) with owner-only permissions. `ACTIONS_SNITCH_CONFIG` can select a different file. Existing files are never overwritten; edit them directly to change settings. Press Ctrl-C to cancel before writing. Setup only requires `jq` and `yq`, and does not scan or modify a repository.
 
@@ -149,6 +149,8 @@ ai:
   enabled: false
   provider: codex
   model: your-provider-model-id
+  # Optional when the selected provider and model support it.
+  # effort: high
   threshold: 80
   issue_search: auto
 ```
@@ -165,10 +167,13 @@ Environment variables override the corresponding defaults:
 - `ACTIONS_SNITCH_AI=true|false`
 - `ACTIONS_SNITCH_AI_PROVIDER=codex|claude|cursor|gemini|opencode|copilot|antigravity`
 - `ACTIONS_SNITCH_AI_MODEL=model-id`
+- `ACTIONS_SNITCH_AI_EFFORT=provider-supported-level`
 - `ACTIONS_SNITCH_AI_THRESHOLD=0..100`
 - `ACTIONS_SNITCH_CONFIG=/path/to/config.yaml`
 
 Each assessment runs non-interactively in a temporary directory. Codex, Claude, and Antigravity receive the actions-snitch JSON schema directly. Cursor, Gemini, OpenCode, and Copilot return machine-readable envelopes, from which actions-snitch extracts and validates the final JSON response against the same schema. Every backend error, missing response, parse failure, or schema violation fails closed. The request sends redacted workflow evidence to the selected provider through its authenticated CLI session.
+
+Codex, Claude, Gemini, OpenCode, Copilot, and Antigravity receive the complete assessment prompt through stdin. The Cursor adapter requires a command argument, so prompts above 32 KiB require manual review without invoking the CLI. This limit counts bytes and preserves the complete workflow evidence.
 
 ### Pull Request Body
 

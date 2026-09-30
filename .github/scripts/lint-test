@@ -10,7 +10,7 @@ SCRIPT="$ROOT/actions-snitch"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/actions-snitch-lint-test.XXXXXXXXXX")
 
 # Never load a developer's live AI configuration during fixture tests.
-unset ACTIONS_SNITCH_CONFIG ACTIONS_SNITCH_AI ACTIONS_SNITCH_AI_PROVIDER ACTIONS_SNITCH_AI_MODEL ACTIONS_SNITCH_AI_THRESHOLD
+unset ACTIONS_SNITCH_CONFIG ACTIONS_SNITCH_AI ACTIONS_SNITCH_AI_PROVIDER ACTIONS_SNITCH_AI_MODEL ACTIONS_SNITCH_AI_EFFORT ACTIONS_SNITCH_AI_THRESHOLD
 export XDG_CONFIG_HOME="$TMP_ROOT/config"
 
 cleanup() {
@@ -266,16 +266,9 @@ printf '%s\n' "$*" > "$TEST_PROVIDER_LOG.args"
 binary=$(basename "$0")
 prompt=""
 case "$binary" in
-  claude) prompt=$(cat) ;;
-  agent|cursor-agent|opencode) prompt="${!#}" ;;
-  *)
-    while (( $# > 0 )); do
-      case "$1" in
-        -p|--print|--prompt) prompt="$2"; break ;;
-        *) shift ;;
-      esac
-    done
-    ;;
+  agent|cursor-agent) prompt="${!#}" ;;
+  agy) prompt=$(jq -er 'select(.event == "user") | .message.content') ;;
+  *) prompt=$(cat) ;;
 esac
 printf '%s' "$prompt" > "$TEST_PROVIDER_LOG.prompt"
 
@@ -297,7 +290,7 @@ case "$binary" in
     jq -cn --arg assessment "$assessment" '{type: "assistant.message", data: {content: $assessment}}'
     ;;
   agy)
-    jq -cn --argjson assessment "$assessment" '{status: "SUCCESS", structured_output: $assessment}'
+    jq -cn --argjson assessment "$assessment" '{event: "result", result: {status: "SUCCESS", structured_output: $assessment}}'
     ;;
 esac
 PROVIDER
@@ -845,43 +838,55 @@ test_force_gate() {
 }
 
 test_unknown_compatibility_gate() {
-  local ai_dir="$TMP_ROOT/unknown-ai"
-  local skip_dir="$TMP_ROOT/unknown-skip"
-  local force_dir="$TMP_ROOT/unknown-force"
-  local output prompt
+  local score case_dir ai_dir skip_dir force_dir review_dir output prompt
 
-  mkdir -p "$ai_dir/repo" "$skip_dir/repo" "$force_dir/repo"
-  write_stubs "$ai_dir/bin" Unknown
-  write_stubs "$skip_dir/bin" Unknown
-  write_stubs "$force_dir/bin" Unknown
-  write_ai_stub "$ai_dir/bin" allow "$ai_dir/codex"
-  init_ai_workflow_repo "$ai_dir/repo"
-  init_workflow_repo "$skip_dir/repo"
-  init_workflow_repo "$force_dir/repo"
+  for score in Unknown 101 18446744073709551715; do
+    case_dir="$TMP_ROOT/unknown-score-$score"
+    ai_dir="$case_dir/ai"
+    skip_dir="$case_dir/skip"
+    force_dir="$case_dir/force"
+    review_dir="$case_dir/review"
+    mkdir -p "$ai_dir/repo" "$skip_dir/repo" "$force_dir/repo" "$review_dir/repo"
+    write_stubs "$ai_dir/bin" "$score"
+    write_stubs "$skip_dir/bin" "$score"
+    write_stubs "$force_dir/bin" "$score"
+    write_stubs "$review_dir/bin" "$score"
+    write_ai_stub "$ai_dir/bin" allow "$ai_dir/codex"
+    write_ai_stub "$review_dir/bin" review "$review_dir/codex"
+    init_ai_workflow_repo "$ai_dir/repo"
+    init_ai_workflow_repo "$review_dir/repo"
+    init_workflow_repo "$skip_dir/repo"
+    init_workflow_repo "$force_dir/repo"
 
-  (cd "$ai_dir/repo" && PATH="$ai_dir/bin:$PATH" XDG_CACHE_HOME="$ai_dir/cache" \
-    ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
-  [[ "$(workflow_ref "$ai_dir/repo")" == *"actions/checkout@v4"* ]] ||
-    fail "AI approval should allow an update with an unknown compatibility score"
-  prompt=$(cat "$ai_dir/codex.prompt")
-  [[ "$prompt" == *'"compatibility_score":"Unknown"'* ]] ||
-    fail "AI evidence should identify an unknown compatibility score"
+    (cd "$ai_dir/repo" && PATH="$ai_dir/bin:$PATH" XDG_CACHE_HOME="$ai_dir/cache" \
+      ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
+    [[ "$(workflow_ref "$ai_dir/repo")" == *"actions/checkout@v4"* ]] ||
+      fail "$score should allow an update after AI approval"
+    prompt=$(cat "$ai_dir/codex.prompt")
+    [[ "$prompt" == *'"compatibility_score":"Unknown"'* ]] ||
+      fail "$score should reach AI as an unknown compatibility score"
 
-  output=$(cd "$skip_dir/repo" && PATH="$skip_dir/bin:$PATH" XDG_CACHE_HOME="$skip_dir/cache" \
-    ACTIONS_SNITCH_AI=false TERM=dumb "$SCRIPT" -u)
-  [[ "$(workflow_ref "$skip_dir/repo")" == *"actions/checkout@v2"* ]] ||
-    fail "an unknown compatibility score should fail closed without AI"
-  [[ "$output" == *"compatibility score is unknown"* ]] ||
-    fail "a skipped unknown-score update should explain the fail-closed decision"
+    (cd "$review_dir/repo" && PATH="$review_dir/bin:$PATH" XDG_CACHE_HOME="$review_dir/cache" \
+      ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
+    [[ -s "$review_dir/codex.prompt" && "$(workflow_ref "$review_dir/repo")" == *"actions/checkout@v2"* ]] ||
+      fail "$score should require a validated AI allow decision"
 
-  (cd "$force_dir/repo" && PATH="$force_dir/bin:$PATH" XDG_CACHE_HOME="$force_dir/cache" \
-    ACTIONS_SNITCH_AI=false "$SCRIPT" -u -f >/dev/null)
-  [[ "$(workflow_ref "$force_dir/repo")" == *"actions/checkout@v4"* ]] ||
-    fail "-f should remain the explicit override for an unknown compatibility score"
+    output=$(cd "$skip_dir/repo" && PATH="$skip_dir/bin:$PATH" XDG_CACHE_HOME="$skip_dir/cache" \
+      ACTIONS_SNITCH_AI=false TERM=dumb "$SCRIPT" -u)
+    [[ "$(workflow_ref "$skip_dir/repo")" == *"actions/checkout@v2"* ]] ||
+      fail "$score should fail closed without AI"
+    [[ "$output" == *"compatibility score is unknown"* ]] ||
+      fail "$score should explain why its update was skipped"
+
+    (cd "$force_dir/repo" && PATH="$force_dir/bin:$PATH" XDG_CACHE_HOME="$force_dir/cache" \
+      ACTIONS_SNITCH_AI=false "$SCRIPT" -u -f >/dev/null)
+    [[ "$(workflow_ref "$force_dir/repo")" == *"actions/checkout@v4"* ]] ||
+      fail "$score should update with the explicit -f override"
+  done
 }
 
 test_ai_provider_adapters() {
-  local provider case_dir repo args prompt
+  local provider case_dir repo args prompt effort
 
   for provider in claude cursor gemini opencode copilot antigravity; do
     case_dir="$TMP_ROOT/provider-$provider"
@@ -890,10 +895,13 @@ test_ai_provider_adapters() {
     write_stubs "$case_dir/bin" 50
     write_provider_adapter_stub "$case_dir/bin" "$provider"
     init_ai_workflow_repo "$repo"
+    effort=""
+    case "$provider" in claude|copilot|antigravity) effort=high ;; esac
 
     (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
       TEST_PROVIDER_LOG="$case_dir/provider" ACTIONS_SNITCH_AI=true \
       ACTIONS_SNITCH_AI_PROVIDER="$provider" ACTIONS_SNITCH_AI_MODEL=test-model \
+      ACTIONS_SNITCH_AI_EFFORT="$effort" \
       "$SCRIPT" -u >/dev/null)
 
     [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
@@ -903,6 +911,10 @@ test_ai_provider_adapters() {
       fail "$provider adapter should receive the redacted evidence prompt"
     args=$(cat "$case_dir/provider.args")
     [[ "$args" == *"test-model"* ]] || fail "$provider adapter should receive the configured model"
+    if [[ -n "$effort" ]]; then
+      [[ "$args" == *"effort"* && "$args" == *"high"* ]] ||
+        fail "$provider adapter should receive the configured effort"
+    fi
     case "$provider" in
       claude)
         [[ "$args" == *"--json-schema"* && "$args" == *"--no-session-persistence"* ]] ||
@@ -917,12 +929,55 @@ test_ai_provider_adapters() {
         [[ "$args" == *"run"* && "$args" == *"--format json"* && "$args" == *"--agent plan"* ]] ||
           fail "opencode adapter should use its non-interactive plan agent" ;;
       copilot)
-        [[ "$args" == *"-p"* && "$args" == *"--no-ask-user"* && "$args" == *"--output-format json"* ]] ||
+        [[ "$args" == *"--no-ask-user"* && "$args" == *"--output-format json"* ]] ||
           fail "copilot adapter should use non-interactive JSON output" ;;
       antigravity)
-        [[ "$args" == *"-p"* && "$args" == *"--json-schema"* && "$args" == *"--sandbox"* ]] ||
+        [[ "$args" == *"--input-format stream-json"* && "$args" == *"--output-format stream-json"* &&
+           "$args" == *"--json-schema"* && "$args" == *"--sandbox"* ]] ||
           fail "antigravity adapter should request sandboxed schema-constrained output" ;;
     esac
+  done
+}
+
+test_large_ai_provider_prompts() {
+  local provider case_dir repo original output
+
+  for provider in codex claude cursor gemini opencode copilot antigravity; do
+    case_dir="$TMP_ROOT/large-prompt-$provider"
+    repo="$case_dir/repo"
+    mkdir -p "$repo"
+    write_stubs "$case_dir/bin" 50
+    if [[ "$provider" == codex ]]; then
+      write_ai_stub "$case_dir/bin" allow "$case_dir/provider"
+    else
+      write_provider_adapter_stub "$case_dir/bin" "$provider"
+    fi
+    init_ai_workflow_repo "$repo"
+    {
+      printf '      - name: |\n          LARGE_WORKFLOW_START'
+      printf '%180000s' ''
+      printf 'LARGE_WORKFLOW_END\n        run: echo done\n'
+    } >> "$repo/.github/workflows/build.yml"
+    cp "$repo/.github/workflows/build.yml" "$repo/.github/workflows/second.yml"
+    original=$(cat "$repo/.github/workflows/build.yml")
+
+    output=$(cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+      TEST_PROVIDER_LOG="$case_dir/provider" ACTIONS_SNITCH_AI=true \
+      ACTIONS_SNITCH_AI_PROVIDER="$provider" ACTIONS_SNITCH_AI_MODEL=test-model \
+      TERM=dumb "$SCRIPT" -u 2>&1)
+
+    if [[ "$provider" == cursor ]]; then
+      [[ ! -e "$case_dir/provider.args" ]] || fail "Cursor must reject oversized prompts before invocation"
+      [[ "$(cat "$repo/.github/workflows/build.yml")" == "$original" ]] || fail "an oversized Cursor prompt must leave workflows unchanged"
+      [[ "$output" == *"Cursor prompt exceeds 32 KiB"* ]] || fail "Cursor must explain its prompt size limit"
+    else
+      [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] || fail "$provider must handle workflow evidence larger than an argument"
+      [[ "$(yq -r '.jobs.build.steps[0].uses' "$repo/.github/workflows/second.yml")" == actions/checkout@v4 ]] || fail "$provider must preserve all matching usages"
+      [[ "$(LC_ALL=C wc -c < "$case_dir/provider.prompt")" -gt 360000 ]] || fail "$provider must receive the complete large prompt"
+      grep -q LARGE_WORKFLOW_END "$case_dir/provider.prompt" || fail "$provider must receive the end of the evidence"
+      ! grep -q LARGE_WORKFLOW_END "$case_dir/provider.args" || fail "$provider must stream large prompts through stdin"
+      [[ "$output" != *"Argument list too long"* ]] || fail "$provider must not exceed exec argument limits"
+    fi
   done
 }
 
@@ -938,14 +993,16 @@ test_ai_allows_low_score_update_and_redacts_context() {
   write_ai_stub "$bin_dir" allow "$codex_log"
   init_ai_workflow_repo "$repo"
 
-  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u >/dev/null)
+  (cd "$repo" && PATH="$bin_dir:$PATH" XDG_CACHE_HOME="$case_dir/cache" ACTIONS_SNITCH_AI=true \
+    ACTIONS_SNITCH_AI_MODEL=test-model ACTIONS_SNITCH_AI_EFFORT=high "$SCRIPT" -u >/dev/null)
 
   [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* ]] ||
     fail "AI allow decision should apply a low compatibility update"
   args=$(cat "${codex_log}.args")
   [[ "$args" == *"exec"* && "$args" == *"--ephemeral"* && "$args" == *"--ignore-user-config"* &&
      "$args" == *"--sandbox read-only"* && "$args" == *"--output-schema"* &&
-     "$args" == *"--output-last-message"* && "$args" == *"--model test-model"* ]] ||
+     "$args" == *"--output-last-message"* && "$args" == *"--model test-model"* &&
+     "$args" == *'model_reasoning_effort="high"'* ]] ||
     fail "AI invocation should use an ephemeral, read-only Codex session with schema-constrained output"
   prompt=$(cat "${codex_log}.prompt")
   [[ "$prompt" == *'"fetch-depth":0'* ]] ||
@@ -2088,6 +2145,7 @@ test_interactive_config_setup() {
   local case_dir="$TMP_ROOT/config-setup"
   local config_file="$case_dir/xdg/actions-snitch/config.yaml"
   local custom_file="$case_dir/custom/settings.yaml"
+  local picker_file="$case_dir/picker/settings.yaml"
   local model='provider/model: "quoted" # literal \\ value'
   local cmd output original
 
@@ -2096,6 +2154,15 @@ test_interactive_config_setup() {
     printf '#!/usr/bin/env bash\nexit 99\n' > "$case_dir/bin/$cmd"
     chmod +x "$case_dir/bin/$cmd"
   done
+  cat > "$case_dir/bin/agy" <<'AGY'
+#!/usr/bin/env bash
+if [[ "${1:-}" == models ]]; then
+  printf '%s\t%s\n' fast-model-low 'Fast Model' deep-model-medium 'Deep Model'
+  exit 0
+fi
+exit 99
+AGY
+  chmod +x "$case_dir/bin/agy"
 
   # Setup works outside a repository, without scanning or invoking a provider.
   (cd "$case_dir" && printf '\n\n\n\n\n' | PATH="$case_dir/bin:$PATH" \
@@ -2105,6 +2172,7 @@ test_interactive_config_setup() {
   [[ "$(yq -r '.ai.model' "$config_file")" == "" ]] || fail "disabled AI may omit a model"
   [[ "$(yq -r '.ai.threshold' "$config_file")" == 80 ]] || fail "setup threshold should default to 80"
   [[ "$(yq -r '.ai.issue_search' "$config_file")" == auto ]] || fail "setup issue search should default to auto"
+  [[ "$(yq -r '.ai | has("effort")' "$config_file")" == false ]] || fail "setup should omit a provider-default effort"
   [[ "$(LC_ALL=C ls -l "$config_file")" == -rw-------* ]] || fail "config should have owner-only permissions"
 
   original=$(cat "$config_file")
@@ -2128,6 +2196,21 @@ test_interactive_config_setup() {
   [[ "$(yq -r '.ai.threshold' "$custom_file")" == 8 ]] || fail "setup should normalize decimal thresholds"
   [[ "$(yq -r '.ai.issue_search' "$custom_file")" == never ]] || fail "setup should save the issue search selection"
   [[ ! -e "$case_dir/unused" ]] || fail "explicit config path should override XDG_CONFIG_HOME"
+
+  output=$(printf '%s\n' yes antigravity 0002 2 '' '' |
+    PATH="$case_dir/bin:$PATH" ACTIONS_SNITCH_CONFIG="$picker_file" "$SCRIPT" -c 2>&1)
+  [[ "$output" == *'Available model choices:'* && "$output" == *'Available effort choices:'* ]] ||
+    fail "setup should show model and effort pickers when the provider lists them"
+  [[ "$(yq -r '.ai.provider' "$picker_file")" == antigravity ]] || fail "picker should save the selected provider"
+  [[ "$(yq -r '.ai.model' "$picker_file")" == deep-model-medium ]] || fail "picker should save the selected provider model"
+  [[ "$(yq -r '.ai.effort' "$picker_file")" == medium ]] || fail "picker should save the selected provider effort"
+  [[ "$output" != *'2) low'* && "$output" != *'3) medium'* && "$output" != *'4) high'* ]] ||
+    fail "Antigravity must only offer the selected model's pinned effort"
+  if ACTIONS_SNITCH_CONFIG="$picker_file" ACTIONS_SNITCH_AI_EFFORT=high "$SCRIPT" -u >"$case_dir/effort-error" 2>&1; then
+    fail "setup must not accept an effort that conflicts with a pinned Antigravity model"
+  fi
+  grep -q 'conflicts with the pinned effort' "$case_dir/effort-error" ||
+    fail "an Antigravity effort mismatch must explain the model constraint"
 
   (unset ACTIONS_SNITCH_CONFIG; printf '\n\n\n0\nalways\n' |
     XDG_CONFIG_HOME="$case_dir/alternate" "$SCRIPT" -c >/dev/null 2>&1)
@@ -2160,6 +2243,7 @@ test_update_branch_creation
 test_force_gate
 test_unknown_compatibility_gate
 test_ai_provider_adapters
+test_large_ai_provider_prompts
 test_ai_allows_low_score_update_and_redacts_context
 test_ai_review_and_invalid_output_fail_closed
 test_ai_rejects_unsafe_remediation
