@@ -146,15 +146,6 @@ list_ai_efforts() {
     case "$provider" in
         claude) printf '%s\n' low medium high xhigh max ;;
         copilot) printf '%s\n' low medium high xhigh max ;;
-        antigravity)
-            # Antigravity's listed Gemini model IDs already pin their effort level.
-            case "$model" in
-                *-low) printf 'low\n' ;;
-                *-medium) printf 'medium\n' ;;
-                *-high) printf 'high\n' ;;
-                *) return 1 ;;
-            esac
-            ;;
         *)
             : "$model"
             return 1

@@ -2197,15 +2197,16 @@ AGY
   [[ "$(yq -r '.ai.issue_search' "$custom_file")" == never ]] || fail "setup should save the issue search selection"
   [[ ! -e "$case_dir/unused" ]] || fail "explicit config path should override XDG_CONFIG_HOME"
 
-  output=$(printf '%s\n' yes antigravity 0002 2 '' '' |
+  output=$(printf '%s\n' yes antigravity 0002 '' '' |
     PATH="$case_dir/bin:$PATH" ACTIONS_SNITCH_CONFIG="$picker_file" "$SCRIPT" -c 2>&1)
-  [[ "$output" == *'Available model choices:'* && "$output" == *'Available effort choices:'* ]] ||
-    fail "setup should show model and effort pickers when the provider lists them"
+  [[ "$output" == *'Available model choices:'* ]] ||
+    fail "setup should show models listed by the provider"
+  [[ "$output" != *'Available effort choices:'* ]] ||
+    fail "Antigravity must skip the effort picker because its model IDs encode effort"
   [[ "$(yq -r '.ai.provider' "$picker_file")" == antigravity ]] || fail "picker should save the selected provider"
   [[ "$(yq -r '.ai.model' "$picker_file")" == deep-model-medium ]] || fail "picker should save the selected provider model"
-  [[ "$(yq -r '.ai.effort' "$picker_file")" == medium ]] || fail "picker should save the selected provider effort"
-  [[ "$output" != *'2) low'* && "$output" != *'3) medium'* && "$output" != *'4) high'* ]] ||
-    fail "Antigravity must only offer the selected model's pinned effort"
+  [[ "$(yq -r '.ai | has("effort")' "$picker_file")" == false ]] ||
+    fail "Antigravity setup must preserve the selected model's effort without an override"
   if ACTIONS_SNITCH_CONFIG="$picker_file" ACTIONS_SNITCH_AI_EFFORT=high "$SCRIPT" -u >"$case_dir/effort-error" 2>&1; then
     fail "setup must not accept an effort that conflicts with a pinned Antigravity model"
   fi
