@@ -26,7 +26,17 @@ Like dependabot, but in bash for local execution. This tool helps you identify a
 - `curl`
 - `git`
 
-AI-assisted updates additionally require an authenticated [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) session and a model that supports structured output.
+AI-assisted updates additionally require an authenticated, supported provider CLI. The interactive setup detects these exact executable names:
+
+| Provider | Executable | Non-interactive interface |
+| --- | --- | --- |
+| [OpenAI Codex](https://developers.openai.com/blog/eval-skills) | `codex` | `codex exec` with an output schema |
+| [Claude Code](https://code.claude.com/docs/en/cli-usage) | `claude` | `claude -p` with a JSON schema |
+| [Cursor Agent](https://cursor.com/docs/en/cli/headless) | `agent` (`cursor-agent` compatibility alias) | Print mode with JSON output |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/tutorials/automation.md) | `gemini` | Headless mode with JSON output |
+| [OpenCode](https://opencode.ai/v2/docs/cli/commands/) | `opencode` | `opencode run` with JSON events |
+| [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference) | `copilot` | Prompt mode with JSON events |
+| [Google Antigravity](https://www.antigravity.google/docs/cli/headless/) | `agy` | Print mode with a JSON schema |
 
 ## Installation
 
@@ -118,7 +128,7 @@ Markdown output links the repository heading to the `origin` remote when one is 
 
 ### AI-Assisted Updates
 
-AI analysis is opt-in and only runs during `-u` or `-p` when an action's compatibility score is below the configured threshold. The model receives redacted workflow context and both action definitions. Release notes, changelogs, compare commits, and a bounded upstream issue search provide additional evidence when available. Scores below 80 still require AI approval or `-f`; lowering the AI threshold does not permit automatic updates between that threshold and 80. It must return a schema-validated `allow`, `review`, or `block` decision.
+AI analysis is opt-in and only runs during `-u` or `-p` when an action's compatibility score is below the configured threshold. The model receives redacted workflow context and both action definitions. Release notes, changelogs, compare commits, and a bounded upstream issue search provide additional evidence when available. Scores below 80 still require AI approval or `-f`; lowering the AI threshold does not permit automatic updates between that threshold and 80. Unknown or invalid compatibility scores also require AI approval or `-f`, so a missing score never authorizes an update by itself. The model must return a schema-validated `allow`, `review`, or `block` decision.
 
 An `allow` decision may include narrowly scoped remediation for the affected action step's `with:` inputs. Before making any change, actions-snitch verifies the workflow file, exact action line and full action path, current action version, input name, and current scalar value. Sensitive inputs, arbitrary YAML patches, permissions, triggers, environment variables, shell commands, and changes outside the affected action step are rejected. All proposed input changes are validated and applied to temporary copies first, so an invalid proposal cannot partially modify the repository. Missing local usage evidence or either action definition, backend errors, and invalid responses fail closed; `-f` remains the explicit version-update override and never applies an unvalidated remediation.
 
@@ -128,7 +138,7 @@ Run the interactive setup:
 actions-snitch -c
 ```
 
-It asks whether to enable AI, which Codex model to use, the compatibility threshold, and the upstream issue search policy. AI stays disabled by default.
+It asks whether to enable AI, which detected provider and model to use, the compatibility threshold, and the upstream issue search policy. The provider prompt lists only supported executables found on `PATH`. AI stays disabled by default.
 
 Setup creates `~/.config/actions-snitch/config.yaml` (or `$XDG_CONFIG_HOME/actions-snitch/config.yaml`) with owner-only permissions. `ACTIONS_SNITCH_CONFIG` can select a different file. Existing files are never overwritten; edit them directly to change settings. Press Ctrl-C to cancel before writing. Setup only requires `jq` and `yq`, and does not scan or modify a repository.
 
@@ -137,13 +147,13 @@ The generated file has this shape:
 ```yaml
 ai:
   enabled: false
-  backend: codex
-  model: your-codex-model-id
+  provider: codex
+  model: your-provider-model-id
   threshold: 80
   issue_search: auto
 ```
 
-The Codex CLI uses its existing login session, so the actions-snitch configuration does not store provider credentials. Authenticate once before enabling AI:
+The selected CLI uses its existing login session, so the actions-snitch configuration does not store provider credentials. Authenticate with that CLI before enabling AI. For example:
 
 ```bash
 codex login
@@ -153,11 +163,12 @@ ACTIONS_SNITCH_AI=true actions-snitch -u
 Environment variables override the corresponding defaults:
 
 - `ACTIONS_SNITCH_AI=true|false`
+- `ACTIONS_SNITCH_AI_PROVIDER=codex|claude|cursor|gemini|opencode|copilot|antigravity`
 - `ACTIONS_SNITCH_AI_MODEL=model-id`
 - `ACTIONS_SNITCH_AI_THRESHOLD=0..100`
 - `ACTIONS_SNITCH_CONFIG=/path/to/config.yaml`
 
-Each assessment runs through `codex exec` as an ephemeral, non-interactive session in a temporary directory. The session ignores user configuration, uses a read-only sandbox, and constrains its final response with the actions-snitch JSON schema. The request still sends redacted workflow evidence to OpenAI through the authenticated Codex session.
+Each assessment runs non-interactively in a temporary directory. Codex, Claude, and Antigravity receive the actions-snitch JSON schema directly. Cursor, Gemini, OpenCode, and Copilot return machine-readable envelopes, from which actions-snitch extracts and validates the final JSON response against the same schema. Every backend error, missing response, parse failure, or schema violation fails closed. The request sends redacted workflow evidence to the selected provider through its authenticated CLI session.
 
 ### Pull Request Body
 
