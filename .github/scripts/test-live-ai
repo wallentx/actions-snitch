@@ -18,7 +18,8 @@ git -C "$live_dir" config user.email fixture@example.invalid
 git -C "$live_dir" add .github/workflows/approve-workflows.yml
 git -C "$live_dir" commit -qm 'The fixture contains a pinned promci usage.'
 cd "$live_dir"
-ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_PROVIDER="$provider" \
+unset ACTIONS_SNITCH_AI_EFFORT ACTIONS_SNITCH_AI_THRESHOLD
+ACTIONS_SNITCH_CONFIG="$live_dir/config.yaml" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_PROVIDER="$provider" \
     ACTIONS_SNITCH_AI_MODEL="$model" "$repo_root/actions-snitch" -s -u
 git diff -- .github/workflows/approve-workflows.yml
 ref=$(yq -r '.jobs.approve.steps[0].uses' .github/workflows/approve-workflows.yml)

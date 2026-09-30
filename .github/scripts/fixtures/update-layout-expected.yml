@@ -13,6 +13,11 @@ jobs:
       - uses: 'actions/checkout@v4'
       - uses: "actions/checkout@v4"
       - uses: "actions/\u0063heckout@v4"
+      - uses: "actions/checkout@v4" # The version contains a YAML escape.
+      - uses: "actions/checkout@v4"
+      - uses: "actions/checkout@v4"
+      - uses: "actions/checkout@v4"
+      - {uses: "actions/checkout@v4", name: "actions/checkout@v2"}
       - "uses": 'actions/checkout@v4'
       - {name: "inline", uses: actions/checkout@v4}
       - {uses: actions/checkout@v4, with: {ref: main}}

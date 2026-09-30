@@ -267,7 +267,7 @@ load_ai_config() {
     esac
     if [[ -n "$AI_EFFORT" ]]; then
         case "$AI_PROVIDER:$AI_EFFORT" in
-            codex:none|codex:minimal|codex:low|codex:medium|codex:high|codex:xhigh|codex:max|codex:ultra|\
+            codex:*|\
             claude:low|claude:medium|claude:high|claude:xhigh|claude:max|\
             copilot:low|copilot:medium|copilot:high|copilot:xhigh|copilot:max|\
             antigravity:low|antigravity:medium|antigravity:high|antigravity:max) ;;
@@ -497,7 +497,8 @@ if [[ "$AI_ENABLED" == "true" ]] && $UPDATE && ! $FORCE; then
         msg "error" "Error: AI analysis requires ai.model in $ACTIONS_SNITCH_CONFIG_FILE or ACTIONS_SNITCH_AI_MODEL"
         exit 1
     fi
-    if [[ "$AI_PROVIDER" == codex ]] && codex_catalog=$(load_codex_catalog); then
+    if [[ "$AI_PROVIDER" == codex ]]; then
+      if codex_catalog=$(load_codex_catalog); then
         if ! printf '%s' "$codex_catalog" | jq -e --arg model "$AI_MODEL" 'any(.models[]; .slug == $model)' >/dev/null; then
             msg "error" "Error: Codex model '$AI_MODEL' is not in the CLI catalog. Check ai.model in $ACTIONS_SNITCH_CONFIG_FILE; codex debug models lists the available IDs."
             exit 1
@@ -508,6 +509,10 @@ if [[ "$AI_ENABLED" == "true" ]] && $UPDATE && ! $FORCE; then
             msg "error" "Error: Codex model '$AI_MODEL' does not support effort '$AI_EFFORT'. Check ai.effort in $ACTIONS_SNITCH_CONFIG_FILE."
             exit 1
         fi
+      elif [[ -n "$AI_EFFORT" ]]; then
+        msg "error" "Error: unable to load the Codex catalog to validate effort '$AI_EFFORT'. Remove ai.effort to use the provider default, or restore codex debug models."
+        exit 1
+      fi
     fi
 fi
 
@@ -1263,8 +1268,9 @@ update_action_ref() {
     local latest_version="$4"
     local target_ref="${5:-$(github_version_ref "$latest_version")}"
     local count index matches expected actual temp_file source_line newline
-    local line_number=0 offset old_ref prefix suffix before after write_failed=false
-    local -a edit_lines=() edit_columns=() edit_refs=()
+    local line_number=0 offset old_ref prefix suffix before after style scalar quoted_ref write_failed=false
+    local quoted_pattern='^([^"]*)"([^"\\]|\\.)*"'
+    local -a edit_lines=() edit_columns=() edit_refs=() edit_styles=()
     local selector='.. | select(tag == "!!map" and has("uses")) |
         select((.uses | tag) == "!!str") |
         select((.uses | split("@")[0]) == strenv(AI_ACTION_PATH) and
@@ -1283,11 +1289,13 @@ update_action_ref() {
         "($selector).uses = (strenv(AI_ACTION_PATH) + \"@\" + strenv(AI_LATEST_VERSION))" \
         "$file") || return 1
     expected=$(jq -csS '.' <<< "$expected") || return 1
-    while IFS=$'\t' read -r line_number offset old_ref; do
+    quoted_ref=$(jq -nr --arg ref "$action_path@$target_ref" '$ref | tojson') || return 1
+    while IFS=$'\t' read -r line_number offset old_ref style; do
         edit_lines+=("$line_number")
         edit_columns+=("$offset")
         edit_refs+=("@${old_ref##*@}")
-    done < <(jq -r '.[] | [.line, .column, .value] | @tsv' <<< "$matches")
+        edit_styles+=("$style")
+    done < <(jq -r '.[] | [.line, .column, .value, .style] | @tsv' <<< "$matches")
 
     temp_file=$(mktemp "${TMPDIR:-/tmp}/actions-snitch-ref.XXXXXXXXXX") || return 1
     line_number=0
@@ -1306,6 +1314,24 @@ update_action_ref() {
             old_ref="${edit_refs[index]}"
             prefix="${source_line:0:offset}"
             suffix="${source_line:offset}"
+            if [[ "${edit_styles[index]}" == double ]]; then
+                if [[ ! "$suffix" =~ $quoted_pattern ]]; then
+                    write_failed=true
+                    break
+                fi
+                scalar="${BASH_REMATCH[0]}"
+                before="${BASH_REMATCH[1]}"
+                after="${suffix:${#scalar}}"
+                scalar="${scalar:${#before}}"
+                if [[ "$scalar" == *"$old_ref"* ]]; then
+                    scalar="${scalar%%"$old_ref"*}@$target_ref${scalar#*"$old_ref"}"
+                else
+                    # JSON quoting produces a valid YAML scalar when the old ref uses escapes.
+                    scalar="$quoted_ref"
+                fi
+                source_line="$prefix$before$scalar$after"
+                continue
+            fi
             if [[ "$suffix" != *"$old_ref"* ]]; then
                 write_failed=true
                 break
@@ -2670,7 +2696,7 @@ scan_files() {
                             run_ai_assessment "$repo" "$current_version" "$latest_version" "$full_action_path" "$COMPAT_SCORE" || true
                             AI_DECISION=$(printf "%s" "$AI_ASSESSMENT_RESULT" | jq -r '.decision')
                             if ! structured_output; then
-                                AI_SUMMARY=$(printf '%s' "$AI_ASSESSMENT_RESULT" | jq -r '.summary' | tr '\r\n\t' '   ')
+                                AI_SUMMARY=$(printf '%s' "$AI_ASSESSMENT_RESULT" | jq -r '.summary | gsub("[\u0000-\u001f\u007f-\u009f]"; " ")')
                                 msg "info" "      AI assessment: $AI_SUMMARY"
                             fi
                             if [[ "$AI_DECISION" == "allow" ]]; then

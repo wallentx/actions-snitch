@@ -3,7 +3,7 @@
     {
       "slug": "test-model",
       "visibility": "list",
-      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]
+      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}, {"effort": "future"}]
     },
     {
       "slug": "gpt-6.1-sol",
