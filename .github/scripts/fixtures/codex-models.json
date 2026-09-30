@@ -1,0 +1,19 @@
+{
+  "models": [
+    {
+      "slug": "test-model",
+      "visibility": "list",
+      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}, {"effort": "future"}]
+    },
+    {
+      "slug": "gpt-6.1-sol",
+      "visibility": "list",
+      "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "xhigh"}, {"effort": "ultra"}]
+    },
+    {
+      "slug": "hidden-model",
+      "visibility": "hide",
+      "supported_reasoning_levels": [{"effort": "high"}]
+    }
+  ]
+}

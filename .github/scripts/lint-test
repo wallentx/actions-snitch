@@ -24,12 +24,13 @@ fail() {
 }
 
 run_shellcheck() {
-  shellcheck --color=always "$SCRIPT" "$ROOT/.github/scripts/lint-test"
+  shellcheck --color=always "$SCRIPT" "$ROOT/.github/scripts/lint-test" "$ROOT/.github/scripts/test-live-ai"
 }
 
 run_syntax_checks() {
   bash -n "$SCRIPT"
   bash -n "$ROOT/.github/scripts/lint-test"
+  bash -n "$ROOT/.github/scripts/test-live-ai"
 }
 
 write_stubs() {
@@ -144,6 +145,11 @@ write_ai_stub() {
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "\${1:-}" == debug && "\${2:-}" == models ]]; then
+  [[ "\${TEST_CODEX_CATALOG_UNAVAILABLE:-}" != true ]] || exit 1
+  cat "$ROOT/.github/scripts/fixtures/codex-models.json"
+  exit 0
+fi
 printf '%s\\n' "\$*" > "${codex_log}.args"
 prompt=\$(cat)
 evidence=\${prompt#*'<evidence_json>'}
@@ -165,6 +171,16 @@ done
 [[ -n "\$output_file" ]] || exit 2
 
 case "$decision" in
+  terminal-controls)
+    jq -cn '{decision: "allow", confidence: "high",
+      summary: "first\u0000\u0007\u001b[31mred\u007f\u0085\u009bend\r\n\tlast",
+      findings: [{caution_detail: "Checkout behavior changed.",
+        safety: "The workflow remains compatible.", evidence: "release_notes"}],
+      remediations: []}' > "\$output_file"
+    ;;
+  error)
+    exit 1
+    ;;
   invalid)
     printf 'not-json\\n' > "\$output_file"
     ;;
@@ -456,6 +472,206 @@ write_commit_sha_default_branch_stubs() {
 
 write_commit_sha_release_stubs() {
   write_sha_stubs "$1"
+}
+
+write_promci_stubs() {
+  local bindir="$1"
+  mkdir -p "$bindir"
+  cat > "$bindir/gh" <<'GH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == api ]] || exit 1
+endpoint="$2"
+shift 2
+query='.'
+while (( $# > 0 )); do
+  if [[ "$1" == --jq ]]; then query="$2"; shift; fi
+  shift
+done
+case "$endpoint" in
+  repos/prometheus/promci/releases/latest|repos/prometheus/promci/releases/tags/v0.10.0)
+    printf '%s' '{"tag_name":"v0.10.0","body":"The action inputs remain compatible.","html_url":"https://github.com/prometheus/promci/releases/tag/v0.10.0"}' | jq -r "$query" ;;
+  repos/prometheus/promci/commits/v0.10.0)
+    printf '%s' '{"sha":"872d318d090d73df349cb6ed90aadd072ca478f7"}' | jq -r "$query" ;;
+  repos/prometheus/promci/compare/370e8c15dcec50043cbe66f2f34633d9efc0a190...872d318d090d73df349cb6ed90aadd072ca478f7)
+    printf '%s' '{"status":"ahead","ahead_by":12,"behind_by":0}' | jq -r "$query" ;;
+  'repos/prometheus/promci/tags?per_page=100')
+    printf '%s' '[[{"name":"v0.9.0","commit":{"sha":"370e8c15dcec50043cbe66f2f34633d9efc0a190"}}]]' ;;
+  'repos/prometheus/promci/releases?per_page=100')
+    printf '%s' '[{"tag_name":"v0.10.0","body":"The action inputs remain compatible.","html_url":"https://github.com/prometheus/promci/releases/tag/v0.10.0"}]' | jq -r "$query" ;;
+  repos/prometheus/promci/compare/370e8c15dcec50043cbe66f2f34633d9efc0a190...v0.10.0)
+    printf '%s' '{"commits":[]}' | jq -r "$query" ;;
+  repos/prometheus/promci)
+    printf '%s' '{"default_branch":"main"}' | jq -r "$query" ;;
+  search/issues)
+    printf '%s' '{"items":[]}' | jq -r "$query" ;;
+  *) exit 1 ;;
+esac
+GH
+  cat > "$bindir/curl" <<CURL
+#!/usr/bin/env bash
+set -euo pipefail
+case "\$*" in
+  *dependabot-badges.githubapp.com*)
+    printf '%s\\n' '<svg><title>compatibility: unknown</title></svg>' ;;
+  *raw.githubusercontent.com/prometheus/promci/370e8c15dcec50043cbe66f2f34633d9efc0a190/approve_workflows/action.yml*|\
+  *raw.githubusercontent.com/prometheus/promci/v0.10.0/approve_workflows/action.yml*)
+    cat "$ROOT/.github/scripts/fixtures/promci-approve-action.yml" ;;
+  *raw.githubusercontent.com/prometheus/promci/370e8c15dcec50043cbe66f2f34633d9efc0a190/approve_workflows/approve-workflows.sh*|\
+  *raw.githubusercontent.com/prometheus/promci/v0.10.0/approve_workflows/approve-workflows.sh*)
+    cat "$ROOT/.github/scripts/fixtures/promci-approve-script.txt" ;;
+  *github.com/marketplace/*) printf '<html></html>' ;;
+  *) exit 22 ;;
+esac
+CURL
+  chmod +x "$bindir/gh" "$bindir/curl"
+}
+
+test_promci_ai_fixture() {
+  local decision case_dir repo original output
+  for decision in allow review error; do
+    case_dir="$TMP_ROOT/promci-$decision"
+    repo="$case_dir/repo"
+    mkdir -p "$repo/.github/workflows"
+    write_promci_stubs "$case_dir/bin"
+    write_ai_stub "$case_dir/bin" "$decision" "$case_dir/codex"
+    cp "$ROOT/.github/scripts/fixtures/promci-approve-workflows.yml" "$repo/.github/workflows/approve-workflows.yml"
+    original=$(cat "$repo/.github/workflows/approve-workflows.yml")
+    output=$(cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+      ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model TERM=dumb "$SCRIPT" -s -u)
+    jq -e '.upgrade.current == "370e8c15dcec50043cbe66f2f34633d9efc0a190" and
+      .upgrade.proposed == "0.10.0" and .upgrade.action_path == "prometheus/promci/approve_workflows" and
+      .upgrade.compatibility_score == "Unknown" and
+      (.upstream.current_action_definition | length > 0) and
+      .upstream.current_action_implementation.files[0].complete == true and
+      .upstream.proposed_action_implementation.files[0].available == true and
+      .local_usages[0].document.jobs.approve.steps[0].with.github_token == "<redacted>"' \
+      "$case_dir/codex.prompt" >/dev/null || fail "promci must retain its exact SHA usage and redacted inputs"
+    if [[ "$decision" == allow ]]; then
+      [[ "$(yq -r '.jobs.approve.steps[0].uses' "$repo/.github/workflows/approve-workflows.yml")" == prometheus/promci/approve_workflows@872d318d090d73df349cb6ed90aadd072ca478f7 ]] ||
+        fail "an approved promci upgrade must preserve the subpath and SHA pin"
+      # shellcheck disable=SC2016 # The expected value is a literal GitHub expression.
+      [[ "$(yq -r '.jobs.approve.steps[0].with.github_token' "$repo/.github/workflows/approve-workflows.yml")" == '${{ github.token }}' ]] ||
+        fail "promci updates must preserve the token expression"
+      [[ "$(cat "$repo/.github/workflows/approve-workflows.yml")" == "${original/370e8c15dcec50043cbe66f2f34633d9efc0a190/872d318d090d73df349cb6ed90aadd072ca478f7}" ]] ||
+        fail "promci updates must change only the SHA and preserve the multiline approve.if layout"
+    else
+      [[ "$(cat "$repo/.github/workflows/approve-workflows.yml")" == "$original" ]] ||
+        fail "promci review and provider errors must leave workflows unchanged"
+      [[ "$output" == *'AI assessment:'* ]] || fail "promci must explain the review reason"
+      if [[ "$decision" == error ]]; then
+        [[ "$output" == *"model 'test-model' did not return an assessment"* ]] ||
+          fail "promci must identify a provider failure rather than hide it behind review"
+      fi
+    fi
+  done
+}
+
+test_codex_catalog_setup() {
+  local case_dir="$TMP_ROOT/codex-catalog" config_file future_file output model effort
+  config_file="$case_dir/config.yaml"
+  future_file="$case_dir/future.yaml"
+  mkdir -p "$case_dir/bin" "$case_dir/repo"
+  write_stubs "$case_dir/bin" 50
+  write_ai_stub "$case_dir/bin" allow "$case_dir/codex"
+  init_workflow_repo "$case_dir/repo"
+  output=$(printf 'yes\ncodex\n2\n4\n\n\n' | PATH="$case_dir/bin:$PATH" \
+    ACTIONS_SNITCH_CONFIG="$config_file" "$SCRIPT" -c 2>&1)
+  [[ "$output" == *'Available model choices:'* && "$output" == *'gpt-6.1-sol'* && "$output" != *'hidden-model'* ]] ||
+    fail "Codex setup must list the catalog's visible models"
+  [[ "$output" == *'Available effort choices:'* && "$output" == *'ultra'* && "$output" != *'2) low'* ]] ||
+    fail "Codex setup must use the selected model's supported efforts"
+  [[ "$(yq -r '.ai.model' "$config_file")" == gpt-6.1-sol && "$(yq -r '.ai.effort' "$config_file")" == ultra ]] ||
+    fail "Codex setup must save exact catalog IDs and efforts"
+
+  for model in gpt6.1-sol test-model; do
+    effort=high
+    [[ "$model" == test-model ]] && effort=xhigh
+    if (cd "$case_dir/repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+      ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL="$model" ACTIONS_SNITCH_AI_EFFORT="$effort" \
+      "$SCRIPT" -u >"$case_dir/error" 2>&1); then
+      fail "Codex must reject a mistyped model or an unsupported model effort"
+    fi
+    [[ ! -e "$case_dir/codex.args" ]] || fail "invalid Codex settings must not invoke inference"
+    [[ "$(workflow_ref "$case_dir/repo")" == *"actions/checkout@v2"* ]] || fail "invalid Codex settings must not modify workflows"
+    grep -q 'Error: Codex model' "$case_dir/error" || fail "Codex must report a configuration error"
+  done
+
+  output=$(printf 'yes\ncodex\n1\n4\n\n\n' | PATH="$case_dir/bin:$PATH" \
+    ACTIONS_SNITCH_CONFIG="$future_file" "$SCRIPT" -c 2>&1)
+  [[ "$output" == *'future'* && "$(yq -r '.ai.effort' "$future_file")" == future ]] ||
+    fail "setup must accept a new effort advertised by the selected Codex model"
+  (cd "$case_dir/repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+    ACTIONS_SNITCH_CONFIG="$future_file" "$SCRIPT" -u >/dev/null)
+  [[ "$(workflow_ref "$case_dir/repo")" == *"actions/checkout@v4"* && \
+     "$(cat "$case_dir/codex.args")" == *'model_reasoning_effort="future"'* ]] ||
+    fail "update mode must accept the catalog effort saved by setup"
+}
+
+test_codex_catalog_unavailable() {
+  local variant case_dir repo output
+  for variant in explicit default; do
+    case_dir="$TMP_ROOT/codex-catalog-unavailable-$variant"
+    repo="$case_dir/repo"
+    mkdir -p "$repo"
+    write_stubs "$case_dir/bin" 50
+    write_ai_stub "$case_dir/bin" allow "$case_dir/codex"
+    init_workflow_repo "$repo"
+    if [[ "$variant" == explicit ]]; then
+      if (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+        ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model ACTIONS_SNITCH_AI_EFFORT=high \
+        TEST_CODEX_CATALOG_UNAVAILABLE=true "$SCRIPT" -u > "$case_dir/error" 2>&1); then
+        fail "an explicit Codex effort requires a readable catalog"
+      fi
+      [[ ! -e "$case_dir/codex.args" && ! -e "$case_dir/codex.prompt" ]] ||
+        fail "an unavailable catalog must reject explicit efforts before inference"
+      [[ "$(workflow_ref "$repo")" == *"actions/checkout@v2"* ]] || fail "catalog errors must preserve the workflow"
+      grep -q 'unable to load the Codex catalog' "$case_dir/error" || fail "catalog errors must explain the fallback policy"
+    else
+      output=$(cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" \
+        ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model \
+        TEST_CODEX_CATALOG_UNAVAILABLE=true "$SCRIPT" -u)
+      [[ "$(workflow_ref "$repo")" == *"actions/checkout@v4"* && "$output" == *'Updated'* ]] ||
+        fail "Codex may use its provider-default effort without a catalog"
+      [[ "$(cat "$case_dir/codex.args")" != *'model_reasoning_effort'* ]] || fail "the default fallback must omit an effort override"
+    fi
+  done
+}
+
+test_live_ai_config_isolation() {
+  local case_dir="$TMP_ROOT/live-ai-config-isolation" output
+  mkdir -p "$case_dir"
+  write_promci_stubs "$case_dir/bin"
+  write_ai_stub "$case_dir/bin" allow "$case_dir/codex"
+  cat > "$case_dir/config.yaml" <<'YAML'
+ai:
+  enabled: false
+  provider: antigravity
+  model: other-model-max
+  effort: max
+  threshold: invalid
+YAML
+  output=$(PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" TERM=dumb \
+    ACTIONS_SNITCH_CONFIG="$case_dir/config.yaml" ACTIONS_SNITCH_AI_EFFORT=unsupported \
+    ACTIONS_SNITCH_AI_THRESHOLD=invalid bash "$ROOT/.github/scripts/test-live-ai" codex test-model)
+  [[ "$output" == *'Updated 1 action reference(s).'* && "$output" == *'872d318d090d73df349cb6ed90aadd072ca478f7'* ]] ||
+    fail "the live helper must use its requested provider/model despite saved config and environment overrides"
+  [[ "$(cat "$case_dir/codex.args")" != *'model_reasoning_effort'* ]] || fail "the live helper must use the provider-default effort"
+}
+
+test_ai_terminal_controls() {
+  local case_dir="$TMP_ROOT/ai-terminal-controls" repo output summary
+  repo="$case_dir/repo"
+  mkdir -p "$repo"
+  write_stubs "$case_dir/bin" 50
+  write_ai_stub "$case_dir/bin" terminal-controls "$case_dir/codex"
+  init_ai_workflow_repo "$repo"
+  output=$(cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" TERM=dumb \
+    ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_MODEL=test-model "$SCRIPT" -u)
+  [[ "$output" == *'AI assessment: first   [31mred   end   last'* ]] || fail "summaries must replace every C0/C1 control with a space"
+  summary=$(printf '%s' "$output" | sed -n 's/^ *AI assessment: //p')
+  printf '%s' "$summary" | jq -Rse 'test("[\u0000-\u001f\u007f-\u009f]") | not' >/dev/null ||
+    fail "model summaries must not emit terminal control characters"
 }
 
 write_null_release_body_stubs() {
@@ -799,6 +1015,41 @@ test_update_in_place() {
     fail "-u should stay on the current branch"
 }
 
+test_update_preserves_yaml_layout() {
+  local variant case_dir repo workflow expected
+  yq -e '.' "$ROOT/.github/scripts/fixtures/update-layout.yml" >/dev/null || fail "the layout fixture must be valid YAML"
+  yq -e '.' "$ROOT/.github/scripts/fixtures/update-layout-expected.yml" >/dev/null || fail "the expected layout fixture must be valid YAML"
+  for variant in lf crlf no-final-newline; do
+    case_dir="$TMP_ROOT/update-layout-$variant"
+    repo="$case_dir/repo"
+    workflow="$repo/.github/workflows/build.yml"
+    expected="$case_dir/expected.yml"
+    mkdir -p "$repo/.github/workflows"
+    write_stubs "$case_dir/bin" 90
+    case "$variant" in
+      lf)
+        cp "$ROOT/.github/scripts/fixtures/update-layout.yml" "$workflow"
+        cp "$ROOT/.github/scripts/fixtures/update-layout-expected.yml" "$expected"
+        ;;
+      crlf)
+        sed 's/$/\r/' "$ROOT/.github/scripts/fixtures/update-layout.yml" > "$workflow"
+        sed 's/$/\r/' "$ROOT/.github/scripts/fixtures/update-layout-expected.yml" > "$expected"
+        ;;
+      no-final-newline)
+        printf '%s' "$(cat "$ROOT/.github/scripts/fixtures/update-layout.yml")" > "$workflow"
+        printf '%s' "$(cat "$ROOT/.github/scripts/fixtures/update-layout-expected.yml")" > "$expected"
+        ;;
+    esac
+    chmod 640 "$workflow"
+    (cd "$repo" && PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" TERM=dumb "$SCRIPT" -u >/dev/null)
+    if ! cmp -s "$expected" "$workflow"; then
+      diff -u "$expected" "$workflow" >&2 || true
+      fail "$variant updates must preserve all source bytes outside action references"
+    fi
+    [[ "$(LC_ALL=C ls -l "$workflow")" == -rw-r-----* ]] || fail "updates must preserve the workflow's permissions"
+  done
+}
+
 test_update_branch_creation() {
   local case_dir="$TMP_ROOT/update-branch"
   local bin_dir="$case_dir/bin"
@@ -855,7 +1106,7 @@ test_force_bypasses_ai() {
         model=""
         # This PATH contains scan dependencies but no AI provider binary.
         for cmd in bash jq yq git tput mkdir dirname date md5sum sha256sum shasum \
-          sed tr cut grep cat find sort head tail wc basename stat cp rm sleep; do
+          sed tr cut grep cat find sort head tail wc basename stat cp rm sleep mktemp; do
           cmd_path=$(command -v "$cmd" 2>/dev/null) || continue
           ln -s "$cmd_path" "$case_dir/bin/$cmd"
         done
@@ -2305,8 +2556,14 @@ AGY
 run_shellcheck
 run_syntax_checks
 test_interactive_config_setup
+test_codex_catalog_setup
+test_codex_catalog_unavailable
+test_live_ai_config_isolation
+test_ai_terminal_controls
+test_promci_ai_fixture
 test_option_validation
 test_update_in_place
+test_update_preserves_yaml_layout
 test_update_branch_creation
 test_force_gate
 test_force_bypasses_ai

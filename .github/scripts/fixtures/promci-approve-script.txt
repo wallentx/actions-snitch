@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -z "${GITHUB_REPOSITORY:-}" || -z "${PR_NUMBER:-}" || -z "${SENDER:-}" ]]; then
+    echo "GITHUB_REPOSITORY, PR_NUMBER, and SENDER must be set"
+    exit 1
+fi
+if ! ROLE=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${SENDER}/permission" --jq '.role_name' 2>/dev/null); then
+    echo "Unable to determine repository access for ${SENDER}"
+    exit 1
+fi
+case "${ROLE}" in
+    triage | write | maintain | admin) ;;
+    *)
+        gh pr comment "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --body "Workflow approval requires triage access or higher."
+        exit 0
+        ;;
+esac
+if ! HEAD_SHA=$(gh pr view "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --json headRefOid --jq '.headRefOid // empty'); then
+    exit 1
+fi
+[[ -n "${HEAD_SHA}" ]] || exit 1
+mapfile -t WAITING_RUNS < <(
+    gh run list --repo "${GITHUB_REPOSITORY}" --commit "${HEAD_SHA}" --limit 100 --json databaseId,conclusion,event \
+        --jq '.[] | select(.conclusion == "action_required" and .event == "pull_request") | .databaseId'
+)
+for RUN_ID in "${WAITING_RUNS[@]}"; do
+    gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/approve" --silent
+done
