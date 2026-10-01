@@ -1,0 +1,2 @@
+# The oracle retains the original Bash bytes, including trailing spaces.
+testdata/oracle/actions-snitch.bash whitespace=-blank-at-eol

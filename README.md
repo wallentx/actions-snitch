@@ -1,96 +1,68 @@
 # actions-snitch
 
-Like dependabot, but in bash for local execution. This tool helps you identify and update outdated GitHub Actions in workflow and composite-action files.
-
-<img width="3173" height="1161" alt="1000037896" src="https://github.com/user-attachments/assets/83e27000-7b8a-4f43-93e0-d7e310287225" />
-
-
-## Features
-
-- 🔍 Scans workflow and composite-action files for outdated GitHub Actions
-- 📍 Shows exact line numbers where actions are used
-- 🚀 Shows compatibility scores between versions
-- 💾 Caches API responses for faster subsequent runs (24h TTL)
-- 🔄 Can automatically create PRs to update actions
-- 🤖 Can ask an optional authenticated provider CLI to investigate low or unknown compatibility scores before updating
-- ☑️ Indicates GitHub Marketplace verified creators
-- 🎨 Cute color-coded output with status badges
-- 🏃 Fast local execution
-- 🔒 Handles private/internal actions gracefully
-
-## Requirements
-
-- `gh` (GitHub CLI)
-- `jq`
-- `yq`
-- `curl`
-- `git`
-
-AI-assisted updates additionally require an authenticated, supported provider CLI. The interactive setup detects these exact executable names:
-
-| Provider | Executable | Non-interactive interface |
-| --- | --- | --- |
-| [OpenAI Codex](https://developers.openai.com/blog/eval-skills) | `codex` | `codex exec` with an output schema |
-| [Claude Code](https://code.claude.com/docs/en/cli-usage) | `claude` | `claude -p` with a JSON schema |
-| [Cursor Agent](https://cursor.com/docs/en/cli/headless) | `agent` (`cursor-agent` compatibility alias) | Print mode with JSON output |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/tutorials/automation.md) | `gemini` | Headless mode with JSON output |
-| [OpenCode](https://opencode.ai/v2/docs/cli/commands/) | `opencode` | `opencode run` with JSON events |
-| [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference) | `copilot` | Prompt mode with JSON events |
-| [Google Antigravity](https://www.antigravity.google/docs/cli/headless/) | `agy` | Print mode with a JSON schema |
+`actions-snitch` scans GitHub workflow and composite-action files, reports outdated action references, and can update them locally or open a pull request. The executable is written in Go.
 
 ## Installation
 
-1. Clone this repository
-2. Add the `bin` directory to your PATH or create a symlink to `bin/actions-snitch` in a directory that's in your PATH
+Build and install with Go 1.26.1 or newer:
+
+```sh
+git clone https://github.com/wallentx/actions-snitch.git
+cd actions-snitch
+make build
+make install                 # Installs to ~/.local/bin/actions-snitch.
+# make install PREFIX=/usr/local
+```
+
+You can also build directly with `go build -o bin/actions-snitch ./cmd/actions-snitch`. The repository-root `actions-snitch` path is a compatibility symlink to that binary, so existing checkout-based launch paths work after `make build`. The executable does not require Bash, jq, yq, or curl. Git operations require `git`; PR creation requires `gh`. GitHub API authentication uses `GH_TOKEN` or `GITHUB_TOKEN`, or the existing `gh auth` login. Public scans can run without credentials, subject to GitHub's anonymous rate limit.
 
 ## Usage
 
-```bash
+```sh
 actions-snitch [-c] [-u] [-s] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]
 ```
 
-### Options
+The command scans the current directory. These options retain their existing meanings:
 
-- `-c` Interactively create the config file and exit (use alone)
-- `-u` Update outdated actions in-place
-- `-s` Pin proposed updates to full commit SHAs; combine with `-u` or `-p` to apply
-- `-f` Force updates regardless of compatibility score (requires -u or -p)
-- `-p` Commit, push, and create a pull request after updating actions (implies -u)
-- `-b` Branch to update or create before applying changes (requires -u or -p)
-- `-o` Output findings as `json`, `md`, or `yaml`
-- `-t` Only update actions from GitHub Marketplace verified creators (requires -u or -p)
-- `-v` Verbose output - show skipped actions and debug info
-- `-h` Display help message
+| Option | Behavior |
+| --- | --- |
+| `-c` | The command creates a configuration interactively and exits. This option must appear alone. |
+| `-u` | The command updates eligible references in place. |
+| `-s` | The command proposes full SHA pins, including pins for already-current release tags. |
+| `-f` | The command bypasses compatibility and AI assessment. This option requires `-u` or `-p`. |
+| `-p` | The command updates, commits, pushes to origin, and creates a PR. |
+| `-b branch` | The command switches to or creates this branch before updating. This option requires `-u` or `-p`. |
+| `-o json\|md\|yaml` | The command prints findings in the selected structured format. |
+| `-t` | The command updates only actions from Marketplace verified creators. This option requires `-u` or `-p`. |
+| `-v` | The command prints discovery and skipped-reference details. |
+| `-h` | The command prints help and exits. |
 
-### SHA pins and readable versions
-
-```bash
-actions-snitch -s       # Preview updates as full SHA pins
-actions-snitch -u -s    # Apply updates as full SHA pins
-actions-snitch -u       # Preserve each reference's existing tag/SHA style
+```sh
+actions-snitch               # Reports findings without changing files.
+actions-snitch -u            # Preserves each reference's existing tag/SHA style.
+actions-snitch -s            # Previews full SHA pins.
+actions-snitch -u -s         # Applies eligible full SHA pins.
+actions-snitch -p -b actions-update
 ```
+
+## Scanning and version policy
+
+The scanner recursively includes `.yml` and `.yaml` files under `.github/workflows`, plus repository files named `action.yml` or `action.yaml`. Composite discovery prunes `.git` and `node_modules`. Findings retain the exact source line and full action path. Docker references, `main`/`master` references, and deeply nested internal action paths remain skipped. Unavailable private/internal repositories do not interrupt other findings.
+
+Major-only references retain major-only updates unless `-s` is used. Other numeric references follow the existing numeric-prefix comparison policy. The latest release supplies the target; when no release exists, the repository's default branch supplies it.
 
 | Current reference | `-u` | `-u -s` |
 | --- | --- | --- |
-| Release tag | Updated tag (major-only tags stay major-only) | Latest release's full commit SHA |
-| Full commit SHA | Updated full commit SHA | Updated full commit SHA |
+| Release tag | The update retains tag style, including major-only tags. | The update uses the latest release's full SHA. |
+| Full SHA | The update uses a full SHA. | The update uses a full SHA. |
 
-`-s` also converts already-current release tags to SHA pins. Branch references such as `main` and `master` remain skipped. Existing compatibility, AI, and verified-creator gates still apply.
+A SHA update requires a resolved 40-character commit identity and a GitHub comparison proving that the target is strictly ahead. Identical, behind, and diverged targets remain unchanged, including with `-f`. The commit distance uses `ahead_by`, including counts beyond one page of commits. Failed resolution or comparison produces a warning and skips the update.
 
-SHA findings show the current SHA's **exact matching tag**, the latest release, and its resolved commit SHA. All tag pages are searched; when multiple tags match, the lowest full stable semantic version is preferred over moving major/minor aliases. This is an exact commit match, not a claim about the first release containing an ancestor commit.
+The exact-tag lookup searches every tag page and compares commit identities. When multiple tags match, it prefers the lowest full stable semantic version over moving major/minor aliases. A successful lookup with no match differs from a lookup failure. A tag identifies an exact commit; it does not identify the first release containing an ancestor.
 
-```text
-Current: <40-character current SHA>
-Current SHA matches tag: v3.11.1
-Latest: 4.4.1
-Latest SHA: <40-character latest SHA>
-```
+## Ignore rules
 
-If no tag matches, `Commits since: N` replaces the tag line. The count comes from [GitHub's compare API](https://docs.github.com/en/rest/commits/commits#compare-two-commits), including counts beyond one page of commits. With no release, the default branch's SHA is the target. Only a target strictly ahead of the current SHA is an update: identical, behind, and diverged histories are never automatically rewritten. Failed SHA resolution or comparison emits a warning and skips the update. A tag lookup failure is reported separately from a successful lookup with no matches.
-
-### Ignoring fixtures
-
-Create `.snitchignore` in the directory where you run actions-snitch. This repository includes `.test/` to exclude local fixture checkouts from both findings and updates.
+The scanner reads `.snitchignore` from the working directory. `.gitignore` does not control scanning.
 
 ```text
 # Paths are relative to the scan directory.
@@ -100,122 +72,90 @@ fixtures with spaces/
 !.github/workflows/example-maintained.yml
 ```
 
-Patterns are Bash globs, not full `.gitignore` syntax: `*`, `?`, and character classes are supported, `*` can span `/`, a trailing `/` matches all descendants, and a leading `/` or `./` is optional. Blank lines and lines beginning with `#` are ignored. `!` re-includes a matching path; the last matching rule wins. `.gitignore` does not control scanning.
+Patterns use Bash conditional-glob semantics. `*` spans `/`; `?`, bracket classes, and extended groups such as `@(fixtures|examples)/*` are supported. A trailing `/` includes descendants. Leading `/` or `./` is optional. Blank lines and lines beginning with `#` are ignored. A leading `!` re-includes a path, and the last matching rule wins.
 
-### Example Output
+## Reports and compatibility
 
-```
-Findings in .github/workflows/build.yml:
-    ❗ actions/checkout is outdated:
-      Line: 52
-      Current: 2
-      Latest: 4
-      🤖compatibility: 79%
-      Release Notes: https://github.com/actions/checkout/releases/tag/v4
-```
+Terminal reports use terminfo colors, and non-CI scans display a loading animation that restores the cursor on completion or cancellation. Verbose scans identify current references and unavailable repositories.
 
-### Structured Output
+Human and Markdown reports mark Marketplace verified creators with `☑️`. JSON and YAML preserve action names and include `verified_creator` as a boolean. Verification uses the action's Marketplace listing rather than an owner allowlist. The `-t` gate also applies to forced updates.
 
-Use `-o json`, `-o md`, or `-o yaml` to print only findings in a machine-readable or report-friendly format. Structured output is grouped under the name of the scanned repository and prints nothing when there are no findings.
+Structured output groups findings under the scanned repository name and prints nothing when there are no findings. Every finding includes `file`, `line`, `action`, `repository`, `current`, `latest`, `current_tag`, `latest_sha`, `commits_since`, `update_ref`, `compatibility_score`, `verified_creator`, and `release_notes`. Unavailable SHA metadata and release-note links are `null` in JSON/YAML. Markdown links the repository heading to its origin remote when available.
 
-SHA metadata is included in JSON, YAML, and Markdown: `current_tag`, `latest_sha`, `commits_since`, and the exact proposed `update_ref`. Unavailable SHA metadata is `null` in JSON/YAML.
+A known compatibility score of at least 80 normally permits an update. Unknown, invalid, or lower scores require AI approval or `-f`. Raising the enabled AI threshold raises the review threshold; lowering it never lowers the score floor of 80. A badge containing conflicting scores is treated as unknown.
 
-Actions from GitHub Marketplace verified creators are marked with `☑️` in human and Markdown output. JSON and YAML output keep the action name unchanged and include a `verified_creator` boolean.
+## AI-assisted updates
 
-Use `-t` with `-u` or `-p` to update only actions from verified creators. This gate is stricter than `-f`; forced updates still skip unverified creators when `-t` is set.
+AI is disabled by default. Enabled AI runs only during updates that require assessment. The integration calls provider APIs directly through langchaingo and does not launch provider CLIs, grant model tools, or execute repository evidence.
 
-Markdown output links the repository heading to the `origin` remote when one is configured.
+| Provider setting | Credential environment | Legacy alias |
+| --- | --- | --- |
+| `openai` | `OPENAI_API_KEY` | `codex` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude` |
+| `gemini` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `googleai` |
+| `openrouter` | `OPENROUTER_API_KEY` | No alias applies. |
+| `ollama` | The local server uses `OLLAMA_HOST`, which defaults to `http://127.0.0.1:11434`. | No alias applies. |
 
-### AI-Assisted Updates
+CLI login sessions and subscription authentication do not supply API credentials. Existing `cursor`, `opencode`, `copilot`, and `antigravity` settings require an explicit provider migration. Configuration stores no credentials, and setup does not ask for them. API providers can bill requests separately from CLI subscriptions.
 
-AI analysis is opt-in and only runs during `-u` or `-p` when an action's compatibility score is below the configured threshold. The model receives redacted workflow context and both action definitions. Release notes, changelogs, compare commits, and a bounded upstream issue search provide additional evidence when available. Scores below 80 still require AI approval or `-f`; lowering the AI threshold does not permit automatic updates between that threshold and 80. Unknown or invalid compatibility scores also require AI approval or `-f`, so a missing score never authorizes an update by itself. The model must return a schema-validated `allow`, `review`, or `block` decision.
+`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `OPENROUTER_BASE_URL` can select explicit compatible endpoints. Endpoint URLs cannot contain credentials, queries, or fragments. The command does not automatically switch providers on failure.
 
-For composite actions, evidence also includes up to four files per version that `run` steps reference through `github.action_path`. Each file is limited to 12,000 characters, and evidence marks missing files, truncation, and omitted files. actions-snitch reads this source without executing it.
-
-An `allow` decision may include narrowly scoped remediation for the affected action step's `with:` inputs. Before making any change, actions-snitch verifies the workflow file, exact action line and full action path, current action version, input name, and current scalar value. Sensitive inputs, arbitrary YAML patches, permissions, triggers, environment variables, shell commands, and changes outside the affected action step are rejected. All proposed input changes are validated and applied to temporary copies first, so an invalid proposal cannot partially modify the repository. Missing local usage evidence or either action definition, backend errors, and invalid responses fail closed; `-f` remains the explicit version-update override and never applies an unvalidated remediation.
-
-Forced updates with `-f` bypass AI assessment, send no workflow evidence to an AI provider, and require neither a provider CLI nor a model. They update action references without applying AI remediation.
-
-Run the interactive setup:
-
-```bash
-actions-snitch -c
-```
-
-It asks whether to enable AI, which detected provider and model to use, the provider effort level when discoverable, the compatibility threshold, and the upstream issue search policy. The provider prompt lists only supported executables found on `PATH`. Codex supplies its visible model IDs through `codex debug models`, and its selected model's `supported_reasoning_levels` populate the effort picker. Cursor, OpenCode, and Antigravity also expose non-interactive model lists. Claude and Copilot offer their documented effort levels. Antigravity model IDs encode the effort, so setup skips its effort picker and saves no separate effort override. Providers without a model catalog use manual model entry. AI stays disabled by default.
-
-When Codex returns a catalog, update mode checks the configured model and effort against that catalog before collecting workflow evidence. Invalid IDs produce a configuration error. If the catalog is unavailable, Codex uses its provider-default effort; an explicit effort requires a readable catalog. Assessment results also print their summary, including a failure reason when the provider could not complete the investigation.
-
-Setup creates `~/.config/actions-snitch/config.yaml` (or `$XDG_CONFIG_HOME/actions-snitch/config.yaml`) with owner-only permissions. `ACTIONS_SNITCH_CONFIG` can select a different file. Existing files are never overwritten; edit them directly to change settings. Press Ctrl-C to cancel before writing. Setup only requires `jq` and `yq`, and does not scan or modify a repository.
-
-The generated file has this shape:
+Run setup with `actions-snitch -c`, or create this configuration:
 
 ```yaml
 ai:
   enabled: false
-  provider: codex
-  model: your-provider-model-id
-  # Optional when the selected provider and model support it.
-  # effort: high
+  provider: openai
+  model: your-api-model-id
   threshold: 80
   issue_search: auto
 ```
 
-The selected CLI uses its existing login session, so the actions-snitch configuration does not store provider credentials. Authenticate with that CLI before enabling AI. For example:
+The default path is `$XDG_CONFIG_HOME/actions-snitch/config.yaml`, or `~/.config/actions-snitch/config.yaml`. `ACTIONS_SNITCH_CONFIG` selects another file. JSON configuration remains valid as a YAML subset, and the legacy `ai.backend` key remains accepted. Setup creates the file with mode `0600`, refuses to overwrite an existing file or symlink, and writes nothing when cancelled.
 
-```bash
-codex login
-ACTIONS_SNITCH_AI=true actions-snitch -u
+| Environment variable | Override |
+| --- | --- |
+| `ACTIONS_SNITCH_AI` | The value controls whether AI is enabled. |
+| `ACTIONS_SNITCH_AI_PROVIDER` | The value selects the API provider. |
+| `ACTIONS_SNITCH_AI_MODEL` | The value selects the provider's model ID. |
+| `ACTIONS_SNITCH_AI_EFFORT` | The value selects a supported thinking level. |
+| `ACTIONS_SNITCH_AI_THRESHOLD` | The value selects an integer threshold from 0 through 100. |
+| `ACTIONS_SNITCH_CONFIG` | The value selects the configuration file. |
+
+The pinned Anthropic adapter supports `ai.effort: low|medium|high` for models it recognizes as reasoning-capable. Unsupported provider/model effort settings produce a migration error when an assessment backend is required. OpenAI effort settings are rejected because the pinned adapter cannot transmit them reliably. Model entry is explicit; setup does not query CLI model catalogs. `issue_search` accepts `auto`, `always`, and `never`; both `auto` and `always` include the bounded upstream search.
+
+The evidence includes complete redacted local documents, current and proposed action definitions, release notes, changelogs, compare commits, and optional issue results. All `env` values, sensitive `with` inputs, and references to the secrets context are redacted. Composite evidence includes at most four referenced implementation files per version, with a 12,000-character bound per file and explicit missing/truncated/omitted indicators. The command reads this source without executing it.
+
+Every response must satisfy the assessment schema and return `allow`, `review`, or `block`. Unknown fields, duplicate keys, incomplete responses, unauthorized tool requests, low-confidence approval, missing required evidence, and provider errors fail closed. Cached assessments undergo the same validation.
+
+An approved remediation can only set or remove non-sensitive scalar `with` inputs on the exact affected action mapping. Validation checks the scanned file, original line, full action path, current version, input name, and exact current value. Arbitrary YAML patches, permissions, triggers, environment variables, shell commands, cross-action changes, and sensitive inputs are rejected.
+
+The planner validates changes against immutable source snapshots, prepares all affected files, and checks the complete resulting YAML before publishing. Version-only edits preserve layout, comments, quoting, line endings, and final-newline state. Changes that would affect unrelated alias consumers fail closed. Publication checks write permission and rejects source files changed since scanning. On Linux and macOS, it preserves ownership, permissions, ACLs, and extended attributes; metadata that cannot be preserved causes the update to fail before publication. Linux uses atomic per-file replacement. macOS writes into the existing inode to preserve its native ACLs, matching the original copy behavior. Both paths attempt rollback after a publication failure, and an unsuccessful rollback retains a recovery backup whose path appears in the error. Cross-file publication is not a filesystem-wide atomic transaction.
+
+Forced updates bypass the model and evidence collection entirely. They apply no AI remediation and still respect verified-creator, ancestry, and SHA-resolution gates.
+
+## Branches and pull requests
+
+Plain `-u` permits existing local changes and can run outside a Git repository. Branch switching requires a clean worktree. PR mode requires a clean worktree and resolves origin's push URL and that repository's default branch before changing branches or files. A fork push URL therefore keeps the PR in the fork. Interactive PR mode can prompt for a branch when `-b` is absent.
+
+PR mode stages only successfully updated files, commits once, pushes to origin, and creates the PR with an explicit repository, head, and base. It refuses unrelated staged work. The body deduplicates repeated updates and includes release notes, changelog and commit details, compatibility badges, SHA metadata, and validated AI investigation/remediation details where applicable.
+
+## Cache and GitHub hosts
+
+The cache lives under `$XDG_CACHE_HOME/actions-snitch`, or `~/.cache/actions-snitch`, and entries expire after 24 hours. Go entries use a separate namespace so projected Bash cache values cannot be mistaken for raw API responses. API entries are isolated by host and credential identity. The cache stores metadata and sanitized assessments, not API credentials or raw workflow documents. Cache files use owner-only permissions.
+
+`GH_HOST` selects the GitHub API host. `github.com` and `*.ghe.com` use `GH_TOKEN` before `GITHUB_TOKEN`; Enterprise Server hosts use `GH_ENTERPRISE_TOKEN` before `GITHUB_ENTERPRISE_TOKEN`. The fallback `gh auth token` lookup names the host explicitly. API pagination cannot move credentials to another origin. Public Marketplace, badge, and raw-source requests use a separate unauthenticated client.
+
+## Development
+
+```sh
+make tools
+make check
+make oracle
 ```
 
-Environment variables override the corresponding defaults:
+`make check` runs formatting/import checks, module verification, vet, staticcheck, golangci-lint, tests, race tests, gosec, and a build. Gosec uses the pinned Go 1.26.6 toolchain because its analyzer does not support the host Go 1.27 standard library. `GOSEC_GOTOOLCHAIN` can select another compatible toolchain.
 
-- `ACTIONS_SNITCH_AI=true|false`
-- `ACTIONS_SNITCH_AI_PROVIDER=codex|claude|cursor|gemini|opencode|copilot|antigravity`
-- `ACTIONS_SNITCH_AI_MODEL=model-id`
-- `ACTIONS_SNITCH_AI_EFFORT=provider-supported-level`
-- `ACTIONS_SNITCH_AI_THRESHOLD=0..100`
-- `ACTIONS_SNITCH_CONFIG=/path/to/config.yaml`
+The differential suite runs the preserved Bash oracle and the production Go runner as separate processes against the same local HTTP fixtures. Bash, jq, yq, curl, and git are required for oracle tests; production use does not require the parsing utilities. The original integration suite remains available through `make oracle`. Tests never use a developer's live model credentials.
 
-Each assessment runs non-interactively in a temporary directory. Codex, Claude, and Antigravity receive the actions-snitch JSON schema directly. Cursor, Gemini, OpenCode, and Copilot return machine-readable envelopes, from which actions-snitch extracts and validates the final JSON response against the same schema. Every backend error, missing response, parse failure, or schema violation fails closed. The request sends redacted workflow evidence to the selected provider through its authenticated CLI session.
-
-Codex, Claude, Gemini, OpenCode, Copilot, and Antigravity receive the complete assessment prompt through stdin. The Cursor adapter requires a command argument, so prompts above 32 KiB require manual review without invoking the CLI. This limit counts bytes and preserves the complete workflow evidence.
-
-The integration suite uses stored model catalogs and promci fixtures with mocked CLI and GitHub responses. You can also test an authenticated model against the promci fixture in a temporary repository:
-
-```bash
-bash .github/scripts/test-live-ai codex gpt-6.1-sol
-```
-
-This live test uses the selected provider's credentials and may consume model usage. It checks an actual AI-approved update without `-f` and removes its temporary repository when it exits.
-
-### Pull Request Body
-
-With `-p`, actions-snitch pushes to `origin` and opens the PR in the repository selected by `origin`'s push URL, targeting that repository's default branch. When `origin` pushes to your fork, the PR stays in your fork instead of GitHub CLI's inferred upstream repository. The destination is checked before any branch or workflow changes.
-
-PRs created with `-p` use a Dependabot-inspired body: a summary of the GitHub Actions updates, one section per unique action/version update, links to the action repositories, collapsible release notes/changelog/commit details, Dependabot compatibility badges, and a small `actions-snitch` footer. Repeated references to the same action update are collapsed into one section with a workflow-entry count. AI-approved updates also include the model's validated compatibility investigation; successfully applied input remediations are listed in that same collapsible section.
-
-## How It Works
-
-1. Scans `.yml` and `.yaml` files in `.github/workflows/`, plus `action.yml` and `action.yaml` composite actions
-2. For each GitHub Action found:
-   - Records the exact line number where it's used
-   - Checks the current version against the latest release
-   - Fetches compatibility score from dependabot
-   - Shows detailed information for outdated actions
-3. Optionally updates workflow and composite-action files in-place
-4. Optionally commits the updates, pushes them, and creates a PR
-5. Skips internal/private actions and docker references
-
-## Cache
-
-The tool caches API responses in `~/.cache/actions-snitch/` (or `$XDG_CACHE_HOME/actions-snitch/`) to:
-- Reduce API calls to GitHub
-- Speed up subsequent runs
-- Avoid rate limiting
-
-Cache entries expire after 24 hours.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+The [architecture document](docs/go-architecture.md) describes package ownership and the [parity matrix](docs/parity.md) maps behavior to regression tests. Jobscout supplies the architectural reference for the thin command, typed configuration, direct langchaingo adapters, and shared local/CI validation.

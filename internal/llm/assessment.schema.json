@@ -1,0 +1,117 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "review",
+        "block"
+      ]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 600
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "caution_detail": {
+            "type": "string",
+            "maxLength": 600
+          },
+          "safety": {
+            "type": "string",
+            "maxLength": 600
+          },
+          "evidence": {
+            "type": "string",
+            "enum": [
+              "workflow",
+              "release_notes",
+              "changelog",
+              "commits",
+              "action_definition",
+              "issues"
+            ]
+          }
+        },
+        "required": [
+          "caution_detail",
+          "safety",
+          "evidence"
+        ]
+      }
+    },
+    "remediations": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "input": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "set",
+              "remove"
+            ]
+          },
+          "current_value": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "new_value": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 600
+          }
+        },
+        "required": [
+          "file",
+          "line",
+          "input",
+          "operation",
+          "current_value",
+          "new_value",
+          "reason"
+        ]
+      }
+    }
+  },
+  "required": [
+    "decision",
+    "confidence",
+    "summary",
+    "findings",
+    "remediations"
+  ]
+}

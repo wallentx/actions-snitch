@@ -6,7 +6,7 @@ if [[ "${RUNNER_VERBOSE:-0}" -eq 1 ]]; then
 fi
 
 ROOT=$(git rev-parse --show-toplevel)
-SCRIPT="$ROOT/actions-snitch"
+SCRIPT="$ROOT/testdata/oracle/actions-snitch.bash"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/actions-snitch-lint-test.XXXXXXXXXX")
 
 # Never load a developer's live AI configuration during fixture tests.
@@ -653,7 +653,7 @@ ai:
 YAML
   output=$(PATH="$case_dir/bin:$PATH" XDG_CACHE_HOME="$case_dir/cache" TERM=dumb \
     ACTIONS_SNITCH_CONFIG="$case_dir/config.yaml" ACTIONS_SNITCH_AI_EFFORT=unsupported \
-    ACTIONS_SNITCH_AI_THRESHOLD=invalid bash "$ROOT/.github/scripts/test-live-ai" codex test-model)
+    ACTIONS_SNITCH_AI_THRESHOLD=invalid ACTIONS_SNITCH_BIN="$SCRIPT" bash "$ROOT/.github/scripts/test-live-ai" codex test-model)
   [[ "$output" == *'Updated 1 action reference(s).'* && "$output" == *'872d318d090d73df349cb6ed90aadd072ca478f7'* ]] ||
     fail "the live helper must use its requested provider/model despite saved config and environment overrides"
   [[ "$(cat "$case_dir/codex.args")" != *'model_reasoning_effort'* ]] || fail "the live helper must use the provider-default effort"

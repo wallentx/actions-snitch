@@ -13,7 +13,7 @@ jobs:
   lint-test:
     name: lint-test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     defaults:
       run:
@@ -35,4 +35,19 @@ jobs:
             shellcheck
 
       - name: Run lint-test
-        run: .github/scripts/lint-test
+        run: make oracle
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cache analysis tools
+        uses: actions/cache@v6
+        with:
+          path: .tools/bin
+          key: go-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Makefile') }}
+
+      - name: Validate Go implementation
+        run: make check

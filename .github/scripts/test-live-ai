@@ -8,6 +8,11 @@ fi
 provider="$1"
 model="$2"
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+binary="${ACTIONS_SNITCH_BIN:-$repo_root/bin/actions-snitch}"
+if [[ ! -x "$binary" ]]; then
+    printf 'Build the Go executable with make build before running this live test.\n' >&2
+    exit 1
+fi
 live_dir=$(mktemp -d "${TMPDIR:-/tmp}/actions-snitch-live-ai.XXXXXXXXXX")
 trap 'rm -rf -- "$live_dir"' EXIT
 mkdir -p "$live_dir/.github/workflows"
@@ -20,7 +25,7 @@ git -C "$live_dir" commit -qm 'The fixture contains a pinned promci usage.'
 cd "$live_dir"
 unset ACTIONS_SNITCH_AI_EFFORT ACTIONS_SNITCH_AI_THRESHOLD
 ACTIONS_SNITCH_CONFIG="$live_dir/config.yaml" ACTIONS_SNITCH_AI=true ACTIONS_SNITCH_AI_PROVIDER="$provider" \
-    ACTIONS_SNITCH_AI_MODEL="$model" "$repo_root/actions-snitch" -s -u
+    ACTIONS_SNITCH_AI_MODEL="$model" "$binary" -s -u
 git diff -- .github/workflows/approve-workflows.yml
 ref=$(yq -r '.jobs.approve.steps[0].uses' .github/workflows/approve-workflows.yml)
 if [[ "$ref" == prometheus/promci/approve_workflows@370e8c15dcec50043cbe66f2f34633d9efc0a190 ]]; then
