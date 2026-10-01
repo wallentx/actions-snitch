@@ -2,3 +2,4 @@
 /.tools/
 /dist/
 /coverage.out
+/coverage.html

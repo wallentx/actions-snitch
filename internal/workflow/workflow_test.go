@@ -48,6 +48,8 @@ func TestDiscoveryAndIgnoreOracle(t *testing.T) {
 	end := strings.Index(string(original), "scan_files() {")
 	cmd := exec.CommandContext(t.Context(), "bash")
 	cmd.Dir = root
+	// The Go scanner orders paths bytewise, so the oracle needs C collation.
+	cmd.Env = append(cmd.Environ(), "LC_ALL=C")
 	cmd.Stdin = strings.NewReader(string(original[start:end]) + "\nfind_action_files\n")
 	b, err := cmd.CombinedOutput()
 	if err != nil {

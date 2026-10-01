@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -203,6 +204,11 @@ func TestBashGoExecutableParity(t *testing.T) {
 					command = exec.CommandContext(t.Context(), "bash", append([]string{oracle}, tc.args...)...)
 				} else {
 					env = append(env, "SNITCH_PARITY_HELPER=1")
+					// Re-executed test binaries write coverage into the parent's
+					// collection directory without changing their compared output.
+					if coverage := flag.Lookup("test.gocoverdir"); coverage != nil && coverage.Value.String() != "" {
+						env = append(env, "GOCOVERDIR="+coverage.Value.String())
+					}
 					command = exec.CommandContext(t.Context(), goBinary, append([]string{"-test.run=^TestGoParityHelper$", "--"}, tc.args...)...)
 				}
 				command.Dir = workspace

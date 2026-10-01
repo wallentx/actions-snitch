@@ -148,13 +148,25 @@ The cache lives under `$XDG_CACHE_HOME/actions-snitch`, or `~/.cache/actions-sni
 
 ## Development
 
-```sh
-make tools
-make check
-make oracle
-```
+Run `make` or `make help` to list the available targets. Progress output uses terminal colors automatically; `COLOR=always`, `COLOR=never`, and `NO_COLOR=1` control that presentation.
 
-`make check` runs formatting/import checks, module verification, vet, staticcheck, golangci-lint, tests, race tests, gosec, and a build. Gosec uses the pinned Go 1.26.6 toolchain because its analyzer does not support the host Go 1.27 standard library. `GOSEC_GOTOOLCHAIN` can select another compatible toolchain.
+| Command | Behavior |
+| --- | --- |
+| `make build` / `make run ARGS="-o json"` | The targets build the local executable and optionally run it. `make run` defaults to help. |
+| `make fix` / `make qa` | The targets apply formatting and module tidying, or check formatting, modules, and static analysis without editing sources. |
+| `make check` / `make full-check` | The standard gate runs formatting/import checks, module verification, vet, staticcheck, golangci-lint, tests, race tests, gosec, and a build. The full gate adds live vulnerability checking and the original Bash suite. |
+| `make coverage` / `make coverage-html` | The targets print function coverage and optionally generate `coverage.html`. |
+| `make release VERSION=v1.0.0 RELEASE_GOOS=linux RELEASE_GOARCH=amd64` | The target creates a local release archive and a SHA-256 checksum under `dist`. |
+
+Individual targets include `fmt-check`, `fmt-fix`, `imports-check`, `imports-fix`, `tidy-check`, `tidy-fix`, `vet`, `staticcheck`, `golangci-lint`, `gosec`, and `govulncheck`. `make security` runs both security scanners. `make tools` installs the pinned helper versions into `.tools/bin`.
+
+`PKGS`, `TIMEOUT`, and `TEST_FLAGS` customize test runs. For example, `make test PKGS=./internal/git TEST_FLAGS="-count=1"` runs the Git tests without using cached results. `test-short`, `test-verbose`, and `race` provide common variants. The timeout defaults to 300 seconds.
+
+`BIN`, `CMD_PATH`, `GO`, `GO_LDFLAGS`, and `TOOLS_BIN` customize build/tool locations and options. `make install` retains the `PREFIX` and `DESTDIR` behavior described above. `make build-info` prints the executable's embedded Go module and VCS information.
+
+Release builds disable CGO and produce `.tar.gz` archives, or `.zip` archives for Windows. Windows packaging requires `zip` or `bsdtar`. Each archive contains the executable, README, and a `VERSION` file; it also includes `LICENSE` when the repository provides one. `VERSION` labels the archive and manifest, and defaults to `RELEASE_TAG` or Git's current description. The binary retains Go's embedded VCS information. `DIST_DIR` selects the output directory. `make clean` removes the selected binary and coverage files while preserving downloaded tools, release archives, tracked files, and symlinks.
+
+Gosec uses the pinned Go 1.26.6 toolchain because its analyzer does not support the host Go 1.27 standard library. `GOSEC_GOTOOLCHAIN` can select another compatible toolchain. Vulnerability checks contact the public Go vulnerability database.
 
 The differential suite runs the preserved Bash oracle and the production Go runner as separate processes against the same local HTTP fixtures. Bash, jq, yq, curl, and git are required for oracle tests; production use does not require the parsing utilities. The original integration suite remains available through `make oracle`. Tests never use a developer's live model credentials.
 
