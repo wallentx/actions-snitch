@@ -12,15 +12,30 @@ import (
 	"github.com/wallentx/actions-snitch/internal/config"
 )
 
-func prompt(reader *bufio.Reader, r Runtime, label string) (string, error) {
+func prompt(ctx context.Context, reader *bufio.Reader, r Runtime, label string) (string, error) {
 	if _, err := fmt.Fprint(r.Error, label); err != nil {
 		return "", err
 	}
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return "", errors.New("setup cancelled: no config was written")
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	return strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"), nil
+	type answer struct {
+		line string
+		err  error
+	}
+	ready := make(chan answer, 1)
+	// Terminal reads need not unblock on Close. Cancellation lets the CLI exit
+	// without waiting for its one outstanding noninteractive stdin read.
+	go func() { line, err := reader.ReadString('\n'); ready <- answer{line, err} }()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case value := <-ready:
+		if value.err != nil {
+			return "", errors.New("setup cancelled: no config was written")
+		}
+		return strings.TrimSuffix(strings.TrimSuffix(value.line, "\n"), "\r"), nil
+	}
 }
 
 func configure(ctx context.Context, r Runtime) error {
@@ -30,11 +45,14 @@ func configure(ctx context.Context, r Runtime) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if r.Interactive {
+		return configureInteractive(ctx, r, path)
+	}
 	reader := bufio.NewReader(r.Input)
 	cfg := config.Defaults()
 	_, _ = fmt.Fprintf(r.Error, "Create %s\nAI analysis sends redacted workflow context to your selected API provider.\n", path)
 	for {
-		answer, err := prompt(reader, r, "Enable AI-assisted updates? [y/N]: ")
+		answer, err := prompt(ctx, reader, r, "Enable AI-assisted updates? [y/N]: ")
 		if err != nil {
 			return err
 		}
@@ -57,7 +75,7 @@ func configure(ctx context.Context, r Runtime) error {
 			_, _ = fmt.Fprintf(r.Error, "  %d) %s\n", i+1, p)
 		}
 		for {
-			answer, err := prompt(reader, r, "Select provider [1]: ")
+			answer, err := prompt(ctx, reader, r, "Select provider [1]: ")
 			if err != nil {
 				return err
 			}
@@ -81,7 +99,7 @@ func configure(ctx context.Context, r Runtime) error {
 			_, _ = fmt.Fprintln(r.Error, "Enter a provider name or number.")
 		}
 		for {
-			answer, err := prompt(reader, r, "Model ID: ")
+			answer, err := prompt(ctx, reader, r, "Model ID: ")
 			if err != nil {
 				return err
 			}
@@ -93,7 +111,7 @@ func configure(ctx context.Context, r Runtime) error {
 		}
 		if cfg.AI.Provider == "anthropic" {
 			for {
-				answer, err := prompt(reader, r, "Thinking effort (low/medium/high; empty uses API default): ")
+				answer, err := prompt(ctx, reader, r, "Thinking effort (low/medium/high; empty uses API default): ")
 				if err != nil {
 					return err
 				}
@@ -106,7 +124,7 @@ func configure(ctx context.Context, r Runtime) error {
 		}
 	}
 	for {
-		answer, err := prompt(reader, r, "Analyze compatibility scores below (0-100) [80]: ")
+		answer, err := prompt(ctx, reader, r, "Analyze compatibility scores below (0-100) [80]: ")
 		if err != nil {
 			return err
 		}
@@ -121,7 +139,7 @@ func configure(ctx context.Context, r Runtime) error {
 		_, _ = fmt.Fprintln(r.Error, "Enter an integer from 0 to 100.")
 	}
 	for {
-		answer, err := prompt(reader, r, "Search upstream issues (auto/always/never) [auto]: ")
+		answer, err := prompt(ctx, reader, r, "Search upstream issues (auto/always/never) [auto]: ")
 		if err != nil {
 			return err
 		}
@@ -144,16 +162,16 @@ func configure(ctx context.Context, r Runtime) error {
 	return nil
 }
 
-func promptBranch(r Runtime) (string, error) {
+func promptBranch(ctx context.Context, r Runtime) (string, error) {
 	reader := bufio.NewReader(r.Input)
-	answer, err := prompt(reader, r, "Create a new branch before applying updates and opening the PR? [Y/n] ")
+	answer, err := prompt(ctx, reader, r, "Create a new branch before applying updates and opening the PR? [Y/n] ")
 	if err != nil {
 		return "", err
 	}
 	if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
 		return "", nil
 	}
-	branch, err := prompt(reader, r, "Branch name [actions-snitch/update-actions]: ")
+	branch, err := prompt(ctx, reader, r, "Branch name [actions-snitch/update-actions]: ")
 	if err != nil {
 		return "", err
 	}

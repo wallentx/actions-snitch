@@ -13,16 +13,11 @@ import (
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	finished := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = os.Stdin.Close()
-		case <-finished:
-		}
-	}()
-	code := app.Run(ctx, os.Args[1:], app.Runtime{Interactive: terminal(os.Stdin) && terminal(os.Stdout)})
-	close(finished)
+	interactive := terminal(os.Stdin) && terminal(os.Stdout)
+	if len(os.Args) == 2 && os.Args[1] == "-c" {
+		interactive = terminal(os.Stdin) && terminal(os.Stderr)
+	}
+	code := app.Run(ctx, os.Args[1:], app.Runtime{Interactive: interactive})
 	cancel()
 	os.Exit(code)
 }

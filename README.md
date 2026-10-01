@@ -100,7 +100,9 @@ CLI login sessions and subscription authentication do not supply API credentials
 
 `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `OPENROUTER_BASE_URL` can select explicit compatible endpoints. Endpoint URLs cannot contain credentials, queries, or fragments. The command does not automatically switch providers on failure.
 
-Run setup with `actions-snitch -c`, or create this configuration:
+Run setup with `actions-snitch -c`. The terminal wizard uses arrow keys and Enter for selection, and `/` filters the provider model list. It fetches models using the selected provider's API credentials, offers retry or manual entry when a catalog is unavailable, and shows a final review before saving. Ctrl+C cancels from any screen or during catalog loading without writing a file. Piped input retains the text-prompt workflow.
+
+You can also create this configuration:
 
 ```yaml
 ai:
@@ -122,7 +124,7 @@ The default path is `$XDG_CONFIG_HOME/actions-snitch/config.yaml`, or `~/.config
 | `ACTIONS_SNITCH_AI_THRESHOLD` | The value selects an integer threshold from 0 through 100. |
 | `ACTIONS_SNITCH_CONFIG` | The value selects the configuration file. |
 
-The pinned Anthropic adapter supports `ai.effort: low|medium|high` for models it recognizes as reasoning-capable. Unsupported provider/model effort settings produce a migration error when an assessment backend is required. OpenAI effort settings are rejected because the pinned adapter cannot transmit them reliably. Model entry is explicit; setup does not query CLI model catalogs. `issue_search` accepts `auto`, `always`, and `never`; both `auto` and `always` include the bounded upstream search.
+The pinned Anthropic adapter supports `ai.effort: low|medium|high` for models it recognizes as reasoning-capable. Unsupported provider/model effort settings produce a migration error when an assessment backend is required. OpenAI effort settings are rejected because the pinned adapter cannot transmit them reliably. Setup lists models from provider APIs rather than CLI catalogs, and retains an explicit model-ID option for custom or unavailable catalogs. `issue_search` accepts `auto`, `always`, and `never`; both `auto` and `always` include the bounded upstream search.
 
 The evidence includes complete redacted local documents, current and proposed action definitions, release notes, changelogs, compare commits, and optional issue results. All `env` values, sensitive `with` inputs, and references to the secrets context are redacted. Composite evidence includes at most four referenced implementation files per version, with a 12,000-character bound per file and explicit missing/truncated/omitted indicators. The command reads this source without executing it.
 

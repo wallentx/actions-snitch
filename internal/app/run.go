@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +31,7 @@ type Runtime struct {
 	Runner      gitops.Runner
 	Client      *github.Client
 	Model       llm.Generator
+	Catalog     func(context.Context, string) ([]llm.ModelInfo, error)
 	Interactive bool
 	style       output.Style
 }
@@ -81,6 +83,10 @@ func Run(ctx context.Context, args []string, r Runtime) int {
 	} else {
 		err = execute(ctx, o, r)
 	}
+	if o.Configure && errors.Is(err, context.Canceled) {
+		_, _ = fmt.Fprintln(r.Error, "Setup cancelled; no config was written.")
+		return 130
+	}
 	if err == nil {
 		err = checked.Err
 	}
@@ -127,7 +133,7 @@ func execute(ctx context.Context, o Options, r Runtime) error {
 		}
 	}
 	if o.PR && o.Branch == "" && r.Interactive {
-		branch, err := promptBranch(r)
+		branch, err := promptBranch(ctx, r)
 		if err != nil {
 			return err
 		}

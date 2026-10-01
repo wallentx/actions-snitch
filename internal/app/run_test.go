@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/tmc/langchaingo/llms"
 	gitops "github.com/wallentx/actions-snitch/internal/git"
@@ -240,4 +243,51 @@ func TestUnreadableLocalEvidenceFailsClosed(t *testing.T) {
 	if fake.calls != 0 || !strings.Contains(string(data), "owner/action@v1") {
 		t.Fatal("incomplete local evidence authorized an update")
 	}
+}
+
+func TestSetupCancellationUnblocksInput(t *testing.T) {
+	root := t.TempDir()
+	reader, writer := io.Pipe()
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var output bytes.Buffer
+	started := make(chan struct{})
+	r := Runtime{Dir: root, Input: &setupReadNotifier{Reader: reader, started: started}, Output: io.Discard, Error: &output, Lookup: func(key string) (string, bool) {
+		if key == "ACTIONS_SNITCH_CONFIG" {
+			return filepath.Join(root, "config.yaml"), true
+		}
+		return "", false
+	}}
+	done := make(chan int, 1)
+	go func() { done <- Run(ctx, []string{"-c"}, r) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("setup did not start reading input")
+	}
+	cancel()
+	select {
+	case code := <-done:
+		if code != 130 {
+			t.Fatalf("exit=%d: %s", code, output.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled setup remained blocked on stdin")
+	}
+	if _, err := os.Stat(filepath.Join(root, "config.yaml")); !os.IsNotExist(err) {
+		t.Fatal("cancelled setup wrote config")
+	}
+}
+
+type setupReadNotifier struct {
+	io.Reader
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *setupReadNotifier) Read(data []byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	return r.Reader.Read(data)
 }
