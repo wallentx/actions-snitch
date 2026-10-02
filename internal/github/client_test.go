@@ -143,7 +143,18 @@ func TestRefPolicies(t *testing.T) {
 		current, latest string
 		pin             bool
 		want            string
-	}{{"v3", "v3.2.1", false, ""}, {"v3", "v4.2.1", false, "v4"}, {"3.1", "4.2.1", false, "4.2.1"}, {"v4.2.1", "v4.2.1", true, newSHA}, {"release-stable", "release-stable", true, newSHA}, {"main", "v4", true, ""}, {"v4.0-rc1", "v4.0-rc2", false, ""}}
+		wantCurrent     bool
+	}{
+		{"v3", "v3.2.1", false, "", true},
+		{"v3", "v3", false, "", true},
+		{"v3", "release-stable", false, "", false},
+		{"v3", "v4.2.1", false, "v4", false},
+		{"3.1", "4.2.1", false, "4.2.1", false},
+		{"v4.2.1", "v4.2.1", true, newSHA, false},
+		{"release-stable", "release-stable", true, newSHA, false},
+		{"main", "v4", true, "", false},
+		{"v4.0-rc1", "v4.0-rc2", false, "", true},
+	}
 	for _, tc := range cases {
 		t.Run(tc.current+"_"+tc.latest, func(t *testing.T) {
 			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +172,9 @@ func TestRefPolicies(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("%s != %s", got, tc.want)
+			}
+			if result.Current != tc.wantCurrent {
+				t.Fatalf("current status = %v, want %v", result.Current, tc.wantCurrent)
 			}
 		})
 	}

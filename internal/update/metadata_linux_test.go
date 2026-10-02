@@ -77,6 +77,36 @@ func TestPublicationPreservesExtendedAttributesAndACL(t *testing.T) {
 	}
 }
 
+func TestPublicationPreservesInheritedSecurityLabel(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "action.yml")
+	f := writeSnapshot(t, root, "action.yml", []byte("uses: owner/action@v1\n"))
+	label := make([]byte, 4096)
+	n, err := unix.Getxattr(path, "security.selinux", label)
+	if errors.Is(err, unix.ENODATA) || errors.Is(err, unix.ENOTSUP) {
+		t.Skip("filesystem does not assign SELinux labels")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Clone(label[:n])
+	plan, err := Build([]*workflow.File{f}, []Group{{ActionPath: "owner/action", Current: "1", Target: "v2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := plan.Commit(t.Context(), root); err != nil {
+		t.Fatal(err)
+	}
+	n, err = unix.Getxattr(path, "security.selinux", label)
+	if err != nil || !bytes.Equal(label[:n], want) {
+		t.Fatalf("security label changed during publication: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "uses: owner/action@v2\n" {
+		t.Fatalf("labeled workflow was not updated: %q %v", data, err)
+	}
+}
+
 func fixtureACL() []byte {
 	b := make([]byte, 4+5*8)
 	binary.LittleEndian.PutUint32(b, 2)

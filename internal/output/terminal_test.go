@@ -3,11 +3,61 @@ package output
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 )
+
+func writeTerminfoFixture(t *testing.T, dir, name, foreground string) {
+	t.Helper()
+	if _, err := exec.LookPath("tic"); err != nil {
+		t.Skip("terminfo compiler unavailable")
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "terminal.src")
+	entry := fmt.Sprintf("%s|Actions Snitch test terminal,\n\tcolors#8,\n\tsetaf=%s,\n\tsgr0=\\E[0m,\n", name, foreground)
+	if err := os.WriteFile(source, []byte(entry), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.CommandContext(t.Context(), "tic", "-o", dir, source).CombinedOutput(); err != nil {
+		t.Fatalf("compile terminfo fixture: %v\n%s", err, output)
+	}
+}
+
+func TestTerminalStylePrefixFallback(t *testing.T) {
+	prefix := t.TempDir()
+	name := "snitch-prefix-colors"
+	writeTerminfoFixture(t, filepath.Join(prefix, "share", "terminfo"), name, `\E[3%p1%dm`)
+	t.Setenv("PREFIX", prefix)
+	t.Setenv("TERMINFO", t.TempDir())
+	t.Setenv("TERMINFO_DIRS", "")
+	if got := TerminalStyle(name).Wrap("success", "value"); got != "\x1b[32mvalue\x1b[0m" {
+		t.Fatalf("prefix terminfo colors: %q", got)
+	}
+	for _, missing := range []string{"", "snitch-no-such-terminal"} {
+		if got := TerminalStyle(missing).Wrap("success", "value"); got != "value" {
+			t.Fatalf("missing terminal %q should remain unstyled: %q", missing, got)
+		}
+	}
+}
+
+func TestTerminalStyleExplicitDatabasePrecedesPrefix(t *testing.T) {
+	prefix, explicit := t.TempDir(), t.TempDir()
+	name := "snitch-explicit-colors"
+	writeTerminfoFixture(t, filepath.Join(prefix, "share", "terminfo"), name, "prefix-")
+	writeTerminfoFixture(t, explicit, name, "explicit-")
+	t.Setenv("PREFIX", prefix)
+	t.Setenv("TERMINFO", explicit)
+	if got := TerminalStyle(name).Wrap("success", "value"); got != "explicit-value\x1b[0m" {
+		t.Fatalf("explicit terminfo database lost precedence: %q", got)
+	}
+}
 
 func TestTerminfoMatchesTput(t *testing.T) {
 	if _, err := exec.LookPath("tput"); err != nil {

@@ -3,6 +3,7 @@
 package update
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -108,12 +109,21 @@ func preserveMetadata(file *os.File, original fileMetadata) error {
 	if err := file.Chmod(original.Mode); err != nil {
 		return err
 	}
+	// Chmod can change ACL attributes. Compare against the post-chmod values
+	// rather than rewriting an already-correct, kernel-managed security label.
+	stagedMetadata, err = metadata(file)
+	if err != nil {
+		return err
+	}
 	names := make([]string, 0, len(original.Attributes))
 	for name := range original.Attributes {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if value, present := stagedMetadata.Attributes[name]; present && bytes.Equal(value, original.Attributes[name]) {
+			continue
+		}
 		if err := unix.Fsetxattr(fd, name, original.Attributes[name], 0); err != nil {
 			return fmt.Errorf("preserve extended attribute %s: %w", name, err)
 		}

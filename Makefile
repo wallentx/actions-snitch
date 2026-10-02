@@ -151,8 +151,17 @@ test-verbose: ## Run tests with verbose output.
 
 race: ## Run the race detector with the configured package selection and timeout.
 	$(call PRINT_STEP,Running the race detector.)
-	@$(GO) test -race -timeout "$(TIMEOUT)" $(TEST_FLAGS) $(PKGS)
-	$(call PRINT_OK,The race detector passed.)
+	@set -eu; \
+		if probe=$$($(GO) list -race runtime/race 2>&1); then \
+			$(GO) test -race -timeout "$(TIMEOUT)" $(TEST_FLAGS) $(PKGS); \
+			printf '$(COLOR_OK)OK:$(COLOR_RESET) %s\n' 'The race detector passed.'; \
+		else \
+			status=$$?; \
+			case "$$probe" in \
+				'-race is not supported on '*) printf 'SKIP: %s\n' "$$probe" ;; \
+				*) printf '%s\n' "$$probe" >&2; exit "$$status" ;; \
+			esac; \
+		fi
 
 coverage: ## Run tests with atomic coverage and print function coverage.
 	$(call PRINT_STEP,Collecting test coverage.)

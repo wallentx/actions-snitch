@@ -78,6 +78,40 @@ func fixtureRuntime(t *testing.T, score string, verified, definitions bool) (Run
 	return Runtime{Dir: root, Lookup: func(k string) (string, bool) { v, ok := env[k]; return v, ok }, Input: strings.NewReader(""), Output: out, Error: errOut, Runner: gitops.Commands{}, Client: client}, out, errOut
 }
 
+func TestVerboseCurrentMajor(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		args          []string
+		confirmations int
+	}{
+		{"verbose", []string{"-v"}, 2},
+		{"quiet", nil, 0},
+		{"structured", []string{"-v", "-o", "json"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, out, errOut := fixtureRuntime(t, "95", true, true)
+			path := filepath.Join(r.Dir, ".github/workflows/main.yml")
+			source := []byte("steps:\n  - uses: owner/action@v2\n  - uses: owner/action@v2\n")
+			if err := os.WriteFile(path, source, 0640); err != nil {
+				t.Fatal(err)
+			}
+			if code := Run(t.Context(), tc.args, r); code != 0 || errOut.Len() != 0 {
+				t.Fatalf("code %d: %s", code, errOut.String())
+			}
+			if got := strings.Count(out.String(), "  ✅ owner/action is up-to-date (2)\n"); got != tc.confirmations {
+				t.Fatalf("got %d confirmations, want %d:\n%s", got, tc.confirmations, out.String())
+			}
+			if strings.Contains(out.String(), "Findings in") || (tc.name == "structured" && out.Len() != 0) {
+				t.Fatalf("current major produced a finding: %s", out.String())
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(data, source) {
+				t.Fatalf("read-only scan modified workflow: %v", err)
+			}
+		})
+	}
+}
+
 func TestAIUpdateSafetyIntegration(t *testing.T) {
 	for _, tc := range []struct {
 		name, decision                           string

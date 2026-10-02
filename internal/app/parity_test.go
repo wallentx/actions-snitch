@@ -91,6 +91,10 @@ func TestBashGoExecutableParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
 	old := strings.Repeat("a", 40)
 	latestSHA := strings.Repeat("b", 40)
 	cases := []struct {
@@ -168,6 +172,9 @@ func TestBashGoExecutableParity(t *testing.T) {
 				t.Fatal(err)
 			}
 			for name, body := range map[string]string{"gh": parityGH, "curl": parityCurl} {
+				// The isolated environment must not depend on Termux's LD_PRELOAD
+				// shebang rewriting: /usr/bin/env does not exist on Android.
+				body = strings.Replace(body, "#!/usr/bin/env bash", "#!"+bash, 1)
 				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0700); err != nil {
 					t.Fatal(err)
 				}
@@ -196,6 +203,11 @@ func TestBashGoExecutableParity(t *testing.T) {
 					}
 				}
 				env := []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + filepath.Join(root, implementation), "XDG_CONFIG_HOME=" + filepath.Join(root, implementation, "config"), "XDG_CACHE_HOME=" + filepath.Join(root, implementation, "cache"), "CI=true", "TERM=dumb", "SNITCH_REAL_CURL=" + realCurl, "SNITCH_FIXTURE_URL=" + server.URL}
+				for _, key := range []string{"PREFIX", "TERMINFO", "TERMINFO_DIRS", "TMPDIR"} {
+					if value, ok := os.LookupEnv(key); ok {
+						env = append(env, key+"="+value)
+					}
+				}
 				if strings.HasPrefix(tc.name, "colored") {
 					env = append(env, "TERM=xterm")
 				}

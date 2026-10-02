@@ -147,7 +147,11 @@ func (c *Client) Resolve(ctx context.Context, u workflow.Usage, pin bool) Resolu
 		currentPrefix, latestPrefix := VersionPrefix(u.Current), VersionPrefix(latest)
 		if majorPattern.MatchString(u.Current) && !pin {
 			major := Major(latest)
-			if major == "" || u.Current == major {
+			if major == "" {
+				return result
+			}
+			if u.Current == major {
+				result.Current = true
 				return result
 			}
 			f.Latest = major

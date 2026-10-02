@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,13 @@ type Style struct {
 
 func TerminalStyle(name string) Style {
 	info, err := terminfo.Load(name)
+	// Termux stores its system database outside the loader's FHS search paths.
+	// Preserve normal TERMINFO/HOME/TERMINFO_DIRS lookup before this fallback.
+	if err != nil && name != "" {
+		if prefix := os.Getenv("PREFIX"); prefix != "" {
+			info, err = terminfo.Open(filepath.Join(prefix, "share", "terminfo"), name)
+		}
+	}
 	if err != nil {
 		return Style{}
 	}

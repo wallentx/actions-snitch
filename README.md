@@ -164,6 +164,8 @@ Individual targets include `fmt-check`, `fmt-fix`, `imports-check`, `imports-fix
 
 `PKGS`, `TIMEOUT`, and `TEST_FLAGS` customize test runs. For example, `make test PKGS=./internal/git TEST_FLAGS="-count=1"` runs the Git tests without using cached results. `test-short`, `test-verbose`, and `race` provide common variants. The timeout defaults to 300 seconds.
 
+The race target checks toolchain support and prints an explicit skip on unsupported targets such as `android/arm64`. Supported targets still run race tests; other setup or test failures remain errors. Termux users can run the rest of `make all` locally, with race coverage supplied by a supported host or CI.
+
 `BIN`, `CMD_PATH`, `GO`, `GO_LDFLAGS`, and `TOOLS_BIN` customize build/tool locations and options. `make install` retains the `PREFIX` and `DESTDIR` behavior described above. `make build-info` prints the executable's embedded Go module and VCS information.
 
 Release builds disable CGO and produce `.tar.gz` archives, or `.zip` archives for Windows. Windows packaging requires `zip` or `bsdtar`. Each archive contains the executable, README, and a `VERSION` file; it also includes `LICENSE` when the repository provides one. `VERSION` labels the archive and manifest, and defaults to `RELEASE_TAG` or Git's current description. The binary retains Go's embedded VCS information. `DIST_DIR` selects the output directory. `make clean` removes the selected binary and coverage files while preserving downloaded tools, release archives, tracked files, and symlinks.
