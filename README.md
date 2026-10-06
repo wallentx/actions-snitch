@@ -78,6 +78,8 @@ Patterns use Bash conditional-glob semantics. `*` spans `/`; `?`, bracket classe
 
 Terminal reports use terminfo colors, and non-CI scans display a loading animation that restores the cursor on completion or cancellation. Verbose scans identify current references and unavailable repositories.
 
+During updates, findings that share an AI assessment appear together with one list of file locations and line numbers. The terminal prints the assessment and update or skip result once per action path and current/proposed version pair. Structured reports retain every individual finding.
+
 Human and Markdown reports mark Marketplace verified creators with `☑️`. JSON and YAML preserve action names and include `verified_creator` as a boolean. Verification uses the action's Marketplace listing rather than an owner allowlist. The `-t` gate also applies to forced updates.
 
 Structured output groups findings under the scanned repository name and prints nothing when there are no findings. Every finding includes `file`, `line`, `action`, `repository`, `current`, `latest`, `current_tag`, `latest_sha`, `commits_since`, `update_ref`, `compatibility_score`, `verified_creator`, and `release_notes`. Unavailable SHA metadata and release-note links are `null` in JSON/YAML. Markdown links the repository heading to its origin remote when available.
@@ -175,3 +177,21 @@ Gosec uses the pinned Go 1.26.6 toolchain because its analyzer does not support 
 The differential suite runs the preserved Bash oracle and the production Go runner as separate processes against the same local HTTP fixtures. Bash, jq, yq, curl, and git are required for oracle tests; production use does not require the parsing utilities. The original integration suite remains available through `make oracle`. Tests never use a developer's live model credentials.
 
 The [architecture document](docs/go-architecture.md) describes package ownership and the [parity matrix](docs/parity.md) maps behavior to regression tests. Jobscout supplies the architectural reference for the thin command, typed configuration, direct langchaingo adapters, and shared local/CI validation.
+
+## Interactive lint repairs
+
+`DIFFTOOL=dplex actions-snitch --lint` proposes structural repairs separately from action upgrades. The mode requires an interactive terminal, an installed `actionlint`, and the existing AI provider/model configuration. Selecting `--lint` explicitly enables the model request even when automatic upgrade assessment is disabled. The flag cannot be combined with upgrade options; `--debug` can add safe diagnostic metadata.
+
+The model receives an opaque structural skeleton and diagnostic line numbers/categories. Names, action references, input values, environment values, comments, and shell content remain local. The repair guard preserves visible words and opaque lines in order, and preserves literal-block content and relative indentation. It permits indentation, list punctuation, and supported runner-expression syntax repairs, including insertion of `fromJSON(format(...))` to construct runner arrays while preserving original operands. Quoted repository names and other unknown runner-expression literals remain opaque until local restoration. It refuses repairs that need new values, renamed keys, reordered content, or hidden semantic information. Composite action definitions are outside this initial lint mode. Input files must use spaces and LF line endings and fit within 128 KiB.
+
+Each complete proposed workflow must pass YAML parsing and actionlint before review. Custom runner labels must be recognized by the repository's actionlint configuration; this mode does not suppress unknown-label diagnostics. Shellcheck and pyflakes are disabled so validation does not launch repository-selected shell tools. Validation does not prove that a repair preserves the intended workflow behavior; the user must review that behavior explicitly.
+
+The `DIFFTOOL` value must name one executable, which receives two private temporary files: the current content followed by the proposal. A wrapper script can supply tool-specific arguments. The tool must write its selection into the first file. Dplex uses `o` and `t` to select changes and saves into that first file, including when it exits. Its four-file mode is not used. The displayed local files contain the original content, so the local diff tool can show the full effect of a repair.
+
+After the tool exits successfully, Actions Snitch accepts original/proposed choices per diff hunk and rejects arbitrary editor changes. Partial selections must retain protected operands and literal-block indentation. Very large diffs require choosing the complete proposal or original. The command validates the selected workflow again and asks for explicit acceptance. An unchanged selection or a negative answer skips that file. Cancellation, an invalid selection, or any later failure leaves every workflow unchanged. Accepted repairs are applied together after all reviews, with snapshot checks and rollback protection. This mode never commits, pushes, or upgrades action references.
+
+## Debugging
+
+`actions-snitch -u --debug` writes diagnostic metadata to stderr. The output includes the provider, model, effort, evidence size, cache hits, HTTP status, timings, and safe provider error codes or parameter names. Structured JSON/YAML reports remain on stdout.
+
+The debug output excludes credentials, prompts, raw model responses, and API response bodies. Raw provider messages can echo credentials or prompts, so they are deliberately omitted. Direct OpenAI GPT-6 requests omit unsupported implicit sampling parameters when using the default reasoning configuration. `--lint --debug` provides the same safe request diagnostics for lint repairs.

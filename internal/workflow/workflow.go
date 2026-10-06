@@ -141,12 +141,12 @@ func Parse(path string, b []byte) (*File, error) {
 		if err := decoder.Decode(&doc); err == io.EOF {
 			break
 		} else if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", path, err)
+			return nil, fmt.Errorf("parse %s: %s", path, YAMLDiagnostic(err))
 		}
 		// Decoding validates duplicate keys and recursive aliases before traversal.
 		var check any
 		if err := doc.Decode(&check); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", path, err)
+			return nil, fmt.Errorf("parse %s: %s", path, YAMLDiagnostic(err))
 		}
 		f.Documents = append(f.Documents, &doc)
 		walk(&doc, nil, func(node *yaml.Node, nodePath []int) {

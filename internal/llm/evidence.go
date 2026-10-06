@@ -123,7 +123,7 @@ func Evidence(ctx context.Context, client *github.Client, files []*workflow.File
 	var usages []UsageEvidence
 	for _, file := range files {
 		if file.Problem != nil {
-			return nil, fmt.Errorf("local workflow evidence is unreadable: %s", file.Path)
+			return nil, fmt.Errorf("local workflow evidence is unreadable: %s: %w", file.Path, file.Problem)
 		}
 		for docIndex, doc := range file.Documents {
 			var lines []int
@@ -137,7 +137,7 @@ func Evidence(ctx context.Context, client *github.Client, files []*workflow.File
 			}
 			var value any
 			if err := doc.Decode(&value); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("decode local workflow %s (document %d): %s", file.Path, docIndex+1, workflow.YAMLDiagnostic(err))
 			}
 			usages = append(usages, UsageEvidence{file.Path, lines, Sanitize(value)})
 		}
@@ -148,11 +148,11 @@ func Evidence(ctx context.Context, client *github.Client, files []*workflow.File
 	currentRef, proposedRef := github.VersionRef(f.Current), github.VersionRef(f.Latest)
 	current, err := client.Definition(ctx, f.Repository, currentRef, actionPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("current action definition: %w", err)
 	}
 	proposed, err := client.Definition(ctx, f.Repository, proposedRef, actionPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("proposed action definition: %w", err)
 	}
 	releases, _ := client.Releases(ctx, f.Repository)
 	comparison, _ := client.Compare(ctx, f.Repository, currentRef, proposedRef)

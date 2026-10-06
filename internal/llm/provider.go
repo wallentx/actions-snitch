@@ -33,7 +33,11 @@ func NewProvider(ctx context.Context, c config.AI, lookup config.Lookup) (llms.M
 		}
 	}
 	get := func(name string) string { v, _ := lookup(name); return v }
-	client := &http.Client{Timeout: 2 * time.Minute, Transport: responseTransport{base: http.DefaultTransport, ollama: c.Provider == "ollama"}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	transport := responseTransport{base: http.DefaultTransport, ollama: c.Provider == "ollama"}
+	if c.Provider == "openai" && (c.Model == "gpt-6" || strings.HasPrefix(c.Model, "gpt-6-") || strings.HasPrefix(c.Model, "gpt-6.")) {
+		transport.omitSampling = true
+	}
+	client := &http.Client{Timeout: 2 * time.Minute, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	var model llms.Model
 	var err error
 	var endpoint string
@@ -104,7 +108,7 @@ func NewProvider(ctx context.Context, c config.AI, lookup config.Lookup) (llms.M
 			return nil, "", fmt.Errorf("the pinned adapter cannot honor effort for model %q; remove ai.effort or use a supported thinking model", c.Model)
 		}
 	}
-	return model, endpoint, nil
+	return diagnosticModel{Model: model}, endpoint, nil
 }
 
 func validateEndpoint(endpoint string) error {

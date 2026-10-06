@@ -85,12 +85,19 @@ func (c *Client) Definition(ctx context.Context, repo, ref, actionPath string) (
 	if prefix != "" {
 		prefix += "/"
 	}
+	var failures []string
 	for _, name := range []string{"action.yml", "action.yaml"} {
-		if b, err := c.Raw(ctx, repo, ref, prefix+name); err == nil && len(b) > 0 {
+		b, err := c.Raw(ctx, repo, ref, prefix+name)
+		if err == nil && len(b) > 0 {
 			return LimitCharacters(string(b), 12000), nil
 		}
+		if err != nil {
+			failures = append(failures, name+": "+err.Error())
+		} else {
+			failures = append(failures, name+": empty response")
+		}
 	}
-	return "", fmt.Errorf("action definition unavailable for %s@%s", actionPath, ref)
+	return "", fmt.Errorf("action definition unavailable for %s@%s (%s)", actionPath, ref, strings.Join(failures, "; "))
 }
 
 func (c *Client) Releases(ctx context.Context, repo string) ([]Release, error) {

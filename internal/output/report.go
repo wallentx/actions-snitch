@@ -111,35 +111,69 @@ func HumanStyled(w io.Writer, findings []model.Finding, pin bool, style Style) e
 			_, _ = fmt.Fprintln(&b, style.Wrap("section", "Findings in "+f.File+":"))
 			lastFile = f.File
 		}
-		kind := "is outdated"
-		if pin && f.Current == f.Latest {
-			kind = "can be pinned to a commit SHA"
-		}
-		_, _ = fmt.Fprintf(&b, "    ❗ %s\n      Line: %s\n      Current: %s\n", style.Wrap("warning", Label(f.Repository, f.VerifiedCreator)+" "+kind+":"), style.Wrap("info", strconv.Itoa(f.Line)), style.Wrap("warning", f.Current))
-		if f.CurrentTag != nil {
-			_, _ = fmt.Fprintf(&b, "      Current SHA matches tag: %s\n", style.Wrap("info", *f.CurrentTag))
-		} else if f.CommitsSince != nil {
-			_, _ = fmt.Fprintf(&b, "      Commits since: %s\n", style.Wrap("info", strconv.Itoa(*f.CommitsSince)))
-		}
-		_, _ = fmt.Fprintf(&b, "      Latest: %s\n", style.Wrap("success", f.Latest))
-		if f.LatestSHA != nil {
-			_, _ = fmt.Fprintf(&b, "      Latest SHA: %s\n", style.Wrap("success", *f.LatestSHA))
-		}
-		color := "\x1b[48;2;153;153;153m"
-		score := "unknown"
-		if n, ok := f.CompatibilityScore.(int); ok {
-			score = strconv.Itoa(n) + "%"
-			color = "\x1b[48;2;51;204;17m"
-			if n < 80 {
-				color = "\x1b[48;2;255;19;51m"
-			}
-		}
-		_, _ = fmt.Fprintf(&b, "      \x1b[48;2;85;85;85m🤖compatibility:%s %s \x1b[0m\n", color, score)
-		if f.ReleaseNotes != nil {
-			_, _ = fmt.Fprintf(&b, "      Release Notes: %s\n", style.Wrap("code", *f.ReleaseNotes))
-		}
-		b.WriteByte('\n')
+		humanFinding(&b, f, pin, style, "      Line: "+style.Wrap("info", strconv.Itoa(f.Line))+"\n")
 	}
 	_, err := w.Write(b.Bytes())
 	return err
+}
+
+// HumanGroupStyled renders the common metadata once and retains every location.
+// Callers group findings by the same action path and current/proposed versions.
+func HumanGroupStyled(w io.Writer, findings []model.Finding, pin bool, style Style) error {
+	if len(findings) < 2 {
+		return HumanStyled(w, findings, pin, style)
+	}
+	var files []string
+	lines := map[string][]string{}
+	for _, f := range findings {
+		if _, ok := lines[f.File]; !ok {
+			files = append(files, f.File)
+		}
+		lines[f.File] = append(lines[f.File], strconv.Itoa(f.Line))
+	}
+	var locations strings.Builder
+	locations.WriteString("      Locations:\n")
+	for _, file := range files {
+		_, _ = fmt.Fprintf(&locations, "        %s: %s\n", style.Wrap("code", file), style.Wrap("info", strings.Join(lines[file], ", ")))
+	}
+	var b bytes.Buffer
+	header := fmt.Sprintf("Findings in %d files (%d references):", len(files), len(findings))
+	if len(files) == 1 {
+		header = fmt.Sprintf("Findings in %s (%d references):", files[0], len(findings))
+	}
+	_, _ = fmt.Fprintln(&b, style.Wrap("section", header))
+	humanFinding(&b, findings[0], pin, style, locations.String())
+	_, err := w.Write(b.Bytes())
+	return err
+}
+
+func humanFinding(b *bytes.Buffer, f model.Finding, pin bool, style Style, locations string) {
+	kind := "is outdated"
+	if pin && f.Current == f.Latest {
+		kind = "can be pinned to a commit SHA"
+	}
+	_, _ = fmt.Fprintf(b, "    ❗ %s\n%s      Current: %s\n", style.Wrap("warning", Label(f.Repository, f.VerifiedCreator)+" "+kind+":"), locations, style.Wrap("warning", f.Current))
+	if f.CurrentTag != nil {
+		_, _ = fmt.Fprintf(b, "      Current SHA matches tag: %s\n", style.Wrap("info", *f.CurrentTag))
+	} else if f.CommitsSince != nil {
+		_, _ = fmt.Fprintf(b, "      Commits since: %s\n", style.Wrap("info", strconv.Itoa(*f.CommitsSince)))
+	}
+	_, _ = fmt.Fprintf(b, "      Latest: %s\n", style.Wrap("success", f.Latest))
+	if f.LatestSHA != nil {
+		_, _ = fmt.Fprintf(b, "      Latest SHA: %s\n", style.Wrap("success", *f.LatestSHA))
+	}
+	color := "\x1b[48;2;153;153;153m"
+	score := "unknown"
+	if n, ok := f.CompatibilityScore.(int); ok {
+		score = strconv.Itoa(n) + "%"
+		color = "\x1b[48;2;51;204;17m"
+		if n < 80 {
+			color = "\x1b[48;2;255;19;51m"
+		}
+	}
+	_, _ = fmt.Fprintf(b, "      \x1b[48;2;85;85;85m🤖compatibility:%s %s \x1b[0m\n", color, score)
+	if f.ReleaseNotes != nil {
+		_, _ = fmt.Fprintf(b, "      Release Notes: %s\n", style.Wrap("code", *f.ReleaseNotes))
+	}
+	b.WriteByte('\n')
 }

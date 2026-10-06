@@ -19,9 +19,38 @@ import (
 type humanTranscript struct {
 	bytes.Buffer
 	segments []string
+	prefixes []string
 }
 
-func (t *humanTranscript) mark() { t.segments = append(t.segments, t.String()); t.Reset() }
+func (t *humanTranscript) mark(findingBytes int) {
+	text := t.String()
+	t.segments = append(t.segments, text)
+	t.prefixes = append(t.prefixes, text[:len(text)-findingBytes])
+	t.Reset()
+}
+
+func findingKey(f model.Finding) string {
+	return output.AssessmentKey(strings.SplitN(f.Action, "@", 2)[0], f.Current, f.Latest)
+}
+
+func humanGroups(findings []model.Finding, assessments map[string]model.Assessment) ([][]model.Finding, bool) {
+	var groups [][]model.Finding
+	positions := map[string]int{}
+	grouped := false
+	for _, f := range findings {
+		key := findingKey(f)
+		if _, assessed := assessments[key]; assessed {
+			if position, exists := positions[key]; exists {
+				groups[position] = append(groups[position], f)
+				grouped = true
+				continue
+			}
+			positions[key] = len(groups)
+		}
+		groups = append(groups, []model.Finding{f})
+	}
+	return groups, grouped
+}
 
 func renderUpdates(w io.Writer, t *humanTranscript, style output.Style, o Options, cfg config.AI, findings []model.Finding, applied []update.Applied, assessments map[string]model.Assessment) error {
 	var b strings.Builder
@@ -30,8 +59,23 @@ func renderUpdates(w io.Writer, t *humanTranscript, style output.Style, o Option
 		updates[output.AssessmentKey(a.Group.ActionPath, a.Group.Current, a.Group.Latest)+"\x00"+a.File] = a
 	}
 	remediated := map[string]bool{}
-	for i, f := range findings {
-		b.WriteString(t.segments[i])
+	groups, grouped := humanGroups(findings, assessments)
+	if grouped {
+		// Scan diagnostics remain visible once, ahead of the grouped results.
+		for _, prefix := range t.prefixes {
+			b.WriteString(prefix)
+		}
+		b.WriteString(t.String())
+	}
+	for i, group := range groups {
+		f := group[0]
+		if grouped {
+			if err := output.HumanGroupStyled(&b, group, o.Pin, style); err != nil {
+				return err
+			}
+		} else {
+			b.WriteString(t.segments[i])
+		}
 		path := strings.SplitN(f.Action, "@", 2)[0]
 		key := output.AssessmentKey(path, f.Current, f.Latest)
 		gate := compat.Gate(f.CompatibilityScore, f.VerifiedCreator, o.VerifiedOnly, o.Force, cfg.Enabled, cfg.Threshold)
@@ -47,14 +91,25 @@ func renderUpdates(w io.Writer, t *humanTranscript, style output.Style, o Option
 				continue
 			}
 		}
-		fileKey := key + "\x00" + f.File
-		if applied, ok := updates[fileKey]; ok {
+		count, target := 0, ""
+		for _, location := range group {
+			fileKey := key + "\x00" + location.File
+			if applied, ok := updates[fileKey]; ok {
+				count += applied.Count
+				target = applied.Group.Target
+				delete(updates, fileKey)
+			}
+		}
+		if count > 0 {
 			if assessed && len(assessment.Remediations) > 0 && !remediated[key] {
 				_, _ = writeHumanLine(&b, style, "      Applied %d scoped AI remediation(s) for %s\n", len(assessment.Remediations), path)
 				remediated[key] = true
 			}
-			_, _ = writeHumanLine(&b, style, "      Updated %s from %s to %s\n", path, f.Current, applied.Group.Target)
-			delete(updates, fileKey)
+			if len(group) > 1 {
+				_, _ = writeHumanLine(&b, style, "      Updated %d reference(s) for %s from %s to %s\n", count, path, f.Current, target)
+			} else {
+				_, _ = writeHumanLine(&b, style, "      Updated %s from %s to %s\n", path, f.Current, target)
+			}
 		} else if assessed && !remediated[key] && len(assessment.Remediations) > 0 {
 			_, _ = writeHumanLine(&b, style, "      Skipping update of %s because its AI remediation could not be safely validated and applied. Use -f to force.\n", f.Repository)
 		} else if !gate.Allow && !assessed {
@@ -65,7 +120,9 @@ func renderUpdates(w io.Writer, t *humanTranscript, style output.Style, o Option
 			}
 		}
 	}
-	b.WriteString(t.String())
+	if !grouped {
+		b.WriteString(t.String())
+	}
 	_, err := io.WriteString(w, b.String())
 	return err
 }

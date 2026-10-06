@@ -17,6 +17,7 @@ import (
 	"github.com/tmc/langchaingo/llms"
 	"github.com/wallentx/actions-snitch/internal/cache"
 	"github.com/wallentx/actions-snitch/internal/config"
+	"github.com/wallentx/actions-snitch/internal/diagnostic"
 	"github.com/wallentx/actions-snitch/internal/model"
 )
 
@@ -151,6 +152,7 @@ func (s Service) Assess(ctx context.Context, evidence []byte) model.Assessment {
 	if s.Cache != nil {
 		if b, ok := s.Cache.Get(key); ok {
 			if assessment, err := Validate(b); err == nil {
+				diagnostic.Printf(ctx, "assessment cache=hit")
 				return assessment
 			}
 		}
@@ -165,16 +167,25 @@ func (s Service) Assess(ctx context.Context, evidence []byte) model.Assessment {
 	if s.Config.Effort != "" {
 		options = append(options, llms.WithThinkingMode(llms.ThinkingMode(s.Config.Effort)), llms.WithTemperature(1))
 	}
+	diagnostic.Printf(ctx, "model request provider=%q model=%q evidence_bytes=%d max_tokens=8192 timeout=2m", s.Config.Provider, s.Config.Model, len(evidence))
+	started := time.Now()
 	response, err := s.Model.GenerateContent(callCtx, messages, options...)
-	if err != nil || response == nil {
-		return Review("The configured model did not return an assessment; check the API credentials and model ID.")
+	diagnostic.Printf(ctx, "model request completed elapsed=%s error_type=%T", time.Since(started).Round(time.Millisecond), err)
+	if err != nil {
+		diagnostic.Printf(ctx, "%s", ProviderFailure(err))
+		return Review(ProviderFailure(err))
+	}
+	if response == nil {
+		return Review("The configured model returned no response.")
 	}
 	content, err := responseText(s.Config.Provider, response)
 	if err != nil {
+		diagnostic.Printf(ctx, "model response rejected: %s", err)
 		return Review(err.Error())
 	}
 	assessment, err := Validate([]byte(content))
 	if err != nil {
+		diagnostic.Printf(ctx, "model assessment failed schema validation response_bytes=%d", len(content))
 		return Review("The configured model returned an invalid assessment.")
 	}
 	if s.Cache != nil {

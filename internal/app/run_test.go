@@ -261,14 +261,19 @@ func TestQuietScanAnimationAndCI(t *testing.T) {
 }
 
 func TestUnreadableLocalEvidenceFailsClosed(t *testing.T) {
-	r, _, errOut := fixtureRuntime(t, "20", true, true)
+	r, out, errOut := fixtureRuntime(t, "20", true, true)
 	if err := os.WriteFile(filepath.Join(r.Dir, ".github/workflows/broken.yml"), []byte("steps: ["), 0600); err != nil {
 		t.Fatal(err)
 	}
 	fake := &assessmentModel{response: `{"decision":"allow","confidence":"high","summary":"safe","findings":[],"remediations":[]}`}
 	r.Model = fake
-	if code := Run(context.Background(), []string{"-u", "-o", "json"}, r); code != 0 {
+	if code := Run(context.Background(), []string{"-u"}, r); code != 0 {
 		t.Fatal(errOut.String())
+	}
+	for _, want := range []string{"Evidence collection failed:", ".github/workflows/broken.yml", "yaml:"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing diagnostic %q: %s", want, out.String())
+		}
 	}
 	data, err := os.ReadFile(filepath.Join(r.Dir, ".github/workflows/main.yml"))
 	if err != nil {
@@ -276,6 +281,32 @@ func TestUnreadableLocalEvidenceFailsClosed(t *testing.T) {
 	}
 	if fake.calls != 0 || !strings.Contains(string(data), "owner/action@v1") {
 		t.Fatal("incomplete local evidence authorized an update")
+	}
+}
+
+func TestMissingDefinitionDiagnostic(t *testing.T) {
+	r, out, errOut := fixtureRuntime(t, "20", true, false)
+	fake := &assessmentModel{}
+	r.Model = fake
+	path := filepath.Join(r.Dir, ".github/workflows/main.yml")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Run(t.Context(), []string{"-u"}, r); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	for _, want := range []string{"Evidence collection failed: current action definition:", "owner/action@v1", "action.yml: HTTP status 404", "action.yaml: HTTP status 404"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing diagnostic %q: %s", want, out.String())
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 0 || !bytes.Equal(before, after) {
+		t.Fatal("failed evidence collection called the model or modified the workflow")
 	}
 }
 

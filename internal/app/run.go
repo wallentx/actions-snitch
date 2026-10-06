@@ -12,6 +12,7 @@ import (
 	"github.com/wallentx/actions-snitch/internal/cache"
 	"github.com/wallentx/actions-snitch/internal/compat"
 	"github.com/wallentx/actions-snitch/internal/config"
+	"github.com/wallentx/actions-snitch/internal/diagnostic"
 	gitops "github.com/wallentx/actions-snitch/internal/git"
 	"github.com/wallentx/actions-snitch/internal/github"
 	"github.com/wallentx/actions-snitch/internal/llm"
@@ -78,8 +79,14 @@ func Run(ctx context.Context, args []string, r Runtime) int {
 		}
 		return 0
 	}
+	if o.Debug {
+		ctx = diagnostic.WithWriter(ctx, r.Error)
+		diagnostic.Printf(ctx, "mode update=%t lint=%t force=%t format=%q", o.Update, o.Lint, o.Force, o.Format)
+	}
 	if o.Configure {
 		err = configure(ctx, r)
+	} else if o.Lint {
+		err = executeLint(ctx, r)
 	} else {
 		err = execute(ctx, o, r)
 	}
@@ -91,6 +98,7 @@ func Run(ctx context.Context, args []string, r Runtime) int {
 		err = checked.Err
 	}
 	if err != nil {
+		diagnostic.Printf(ctx, "command failed error_type=%T", err)
 		_, _ = fmt.Fprintln(r.Error, "Error:", err)
 		return 1
 	}
@@ -102,6 +110,7 @@ func execute(ctx context.Context, o Options, r Runtime) error {
 	if err != nil {
 		return err
 	}
+	diagnostic.Printf(ctx, "ai enabled=%t provider=%q model=%q effort=%q threshold=%d", cfg.AI.Enabled, cfg.AI.Provider, cfg.AI.Model, cfg.AI.Effort, cfg.AI.Threshold)
 	store := &cache.Store{Dir: config.CachePath(r.Lookup)}
 	ai := llm.Service{Model: r.Model, Config: cfg.AI, Cache: store}
 	if cfg.AI.Enabled && o.Update && !o.Force && ai.Model == nil {
@@ -340,7 +349,7 @@ func resolve(ctx context.Context, r Runtime, o Options, client *github.Client, f
 					return nil, err
 				}
 				if transcript, ok := r.Output.(*humanTranscript); ok {
-					transcript.mark()
+					transcript.mark(len(data))
 				}
 			}
 		}
@@ -364,12 +373,18 @@ func planGroups(ctx context.Context, r Runtime, o Options, cfg config.AI, client
 		gate := compat.Gate(f.CompatibilityScore, f.VerifiedCreator, o.VerifiedOnly, o.Force, cfg.Enabled, cfg.Threshold)
 		group := update.Group{ActionPath: path, Current: f.Current, Latest: f.Latest, Target: f.UpdateRef}
 		if gate.Assess {
+			diagnostic.Printf(ctx, "collecting evidence action=%q current=%q proposed=%q", path, f.Current, f.Latest)
 			evidence, err := llm.Evidence(ctx, client, files, f, cfg.IssueSearch)
 			assessment := llm.Review("Evidence collection failed.")
 			if err == nil {
+				diagnostic.Printf(ctx, "evidence ready bytes=%d", len(evidence))
 				assessment = ai.Assess(ctx, evidence)
+			} else {
+				diagnostic.Printf(ctx, "evidence failed error_type=%T", err)
+				assessment = llm.Review("Evidence collection failed: " + llm.SafeSummary(err.Error()))
 			}
 			assessments[key] = assessment
+			diagnostic.Printf(ctx, "assessment decision=%q confidence=%q", assessment.Decision, assessment.Confidence)
 			if o.Format == "" {
 				_, _ = fmt.Fprintf(r.Output, "      AI assessment: %s\n", llm.SafeSummary(assessment.Summary))
 			}

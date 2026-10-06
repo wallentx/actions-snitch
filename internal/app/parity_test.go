@@ -231,7 +231,18 @@ func TestBashGoExecutableParity(t *testing.T) {
 				if err := command.Run(); err != nil {
 					t.Fatalf("%s: %v\n%s", implementation, err, stderr.String())
 				}
-				outputs = append(outputs, bytes.ReplaceAll(stdout.Bytes(), []byte(workspace), []byte("<workspace>")))
+				out := bytes.ReplaceAll(stdout.Bytes(), []byte(workspace), []byte("<workspace>"))
+				if implementation == "go" && tc.name == "colored-help" {
+					// The Go-only modes extend help; all original help lines retain parity.
+					var kept [][]byte
+					for _, line := range bytes.Split(out, []byte("\n")) {
+						if !bytes.Contains(line, []byte("--lint ")) && !bytes.Contains(line, []byte("--debug ")) {
+							kept = append(kept, line)
+						}
+					}
+					out = bytes.Join(kept, []byte("\n"))
+				}
+				outputs = append(outputs, out)
 				errorsOut = append(errorsOut, stderr.Bytes())
 				tree := map[string]string{}
 				for _, path := range paths {

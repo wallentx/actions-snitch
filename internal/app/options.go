@@ -4,6 +4,8 @@ package app
 import "fmt"
 
 type Options struct {
+	Lint         bool
+	Debug        bool
 	Configure    bool
 	Update       bool
 	Pin          bool
@@ -19,6 +21,8 @@ type Options struct {
 
 const Usage = `Usage: actions-snitch [-c] [-u] [-s] [-f] [-p] [-b branch] [-o format] [-t] [-v] [-h]
 Options:
+  --debug  Write diagnostic metadata to stderr (credentials and payloads omitted)
+  --lint  Interactively review structural YAML repairs with DIFFTOOL (use alone)
   -c    Interactively create the config file, then exit (use alone)
   -u    Update outdated actions in-place
   -s    Pin updates to full commit SHAs (scan without -u to preview)
@@ -37,6 +41,14 @@ func ParseOptions(args []string) (Options, error) {
 	var o Options
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg == "--debug" {
+			o.Debug = true
+			continue
+		}
+		if arg == "--lint" {
+			o.Lint = true
+			continue
+		}
 		if arg == "--" || len(arg) < 2 || arg[0] != '-' {
 			break
 		}
@@ -85,7 +97,16 @@ func ParseOptions(args []string) (Options, error) {
 			}
 		}
 	}
-	if o.Configure && (len(args) != 1 || args[0] != "-c") {
+	var modeArgs []string
+	for _, arg := range args {
+		if arg != "--debug" {
+			modeArgs = append(modeArgs, arg)
+		}
+	}
+	if o.Lint && (len(modeArgs) != 1 || modeArgs[0] != "--lint") {
+		return o, fmt.Errorf("--lint must be used alone")
+	}
+	if o.Configure && (len(modeArgs) != 1 || modeArgs[0] != "-c") {
 		return o, fmt.Errorf("-c must be used alone")
 	}
 	if !o.Update {
