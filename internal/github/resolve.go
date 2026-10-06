@@ -96,6 +96,38 @@ func (c *Client) Resolve(ctx context.Context, u workflow.Usage, pin bool) Resolu
 	}
 	release, err := c.Latest(ctx, u.Repository)
 	latestRef := release.Tag
+	currentTag := ""
+	tagsResolved := false
+	if err == nil && productReleaseTag.MatchString(latestRef) {
+		current := u.Ref
+		if current == "" {
+			current = u.Current
+		}
+		if IsSHA(u.Current) {
+			tags, tagErr := c.Tags(ctx, u.Repository)
+			if tagErr != nil {
+				return warn(fmt.Sprintf("Unable to determine the action release family for %s@%s; skipping.", u.Repository, u.Current))
+			}
+			currentTag = ExactTag(tags, u.Current)
+			tagsResolved = true
+			current = currentTag
+			if !numericReleaseTag.MatchString(current) {
+				return warn(fmt.Sprintf("Skipping %s: the latest release belongs to a named product and the current SHA has no unambiguous numeric action tag.", u.Repository))
+			}
+		}
+		if numericReleaseTag.MatchString(current) {
+			matched, matchErr := c.newestNumericRelease(ctx, u.Repository)
+			if matchErr != nil {
+				return warn(fmt.Sprintf("Unable to select a matching action release for %s; skipping: %v", u.Repository, matchErr))
+			}
+			if !IsSHA(u.Current) && compareNumericVersions(matched.Tag, current) < 0 {
+				result.Current = true
+				return result
+			}
+			release = matched
+			latestRef = matched.Tag
+		}
+	}
 	if err != nil {
 		result.Debug = append(result.Debug, "  Failed to fetch data from GitHub API: repos/"+u.Repository+"/releases/latest")
 		repo, e := c.Repository(ctx, u.Repository)
@@ -136,11 +168,15 @@ func (c *Client) Resolve(ctx context.Context, u workflow.Usage, pin bool) Resolu
 		f.CommitsSince = &distance
 		f.LatestSHA = &sha
 		f.UpdateRef = sha
-		tags, err := c.Tags(ctx, u.Repository)
-		if err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("Unable to look up tags for %s@%s; showing commit distance only.", u.Repository, u.Current))
+		if tagsResolved {
+			f.CurrentTag = model.String(currentTag)
 		} else {
-			f.CurrentTag = model.String(ExactTag(tags, u.Current))
+			tags, err := c.Tags(ctx, u.Repository)
+			if err != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("Unable to look up tags for %s@%s; showing commit distance only.", u.Repository, u.Current))
+			} else {
+				f.CurrentTag = model.String(ExactTag(tags, u.Current))
+			}
 		}
 		needs = true
 	} else {

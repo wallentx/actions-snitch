@@ -164,9 +164,11 @@ type Repository struct {
 	DefaultBranch string `json:"default_branch"`
 }
 type Release struct {
-	Tag  string `json:"tag_name"`
-	Body string `json:"body"`
-	URL  string `json:"html_url"`
+	Tag        string `json:"tag_name"`
+	Body       string `json:"body"`
+	URL        string `json:"html_url"`
+	Draft      bool   `json:"draft"`
+	Prerelease bool   `json:"prerelease"`
 }
 type Tag struct {
 	Name   string `json:"name"`

@@ -49,7 +49,7 @@ actions-snitch -p -b actions-update
 
 The scanner recursively includes `.yml` and `.yaml` files under `.github/workflows`, plus repository files named `action.yml` or `action.yaml`. Composite discovery prunes `.git` and `node_modules`. Findings retain the exact source line and full action path. Docker references, `main`/`master` references, and deeply nested internal action paths remain skipped. Unavailable private/internal repositories do not interrupt other findings.
 
-Major-only references retain major-only updates unless `-s` is used. Other numeric references follow the existing numeric-prefix comparison policy. The latest release supplies the target; when no release exists, the repository's default branch supplies it.
+Major-only references retain major-only updates unless `-s` is used. Other numeric references follow the existing numeric-prefix comparison policy. The latest release normally supplies the target; when no release exists, the repository's default branch supplies it. If the repository-wide latest tag names another versioned product, such as `codeql-bundle-v2.27.1`, numeric action references instead select the highest stable numeric release across all release pages. Drafts and prereleases are excluded. SHA pins need an exact numeric action tag to identify that family; unresolved families and incomplete lookups produce a warning and remain unchanged, including with `-f`.
 
 | Current reference | `-u` | `-u -s` |
 | --- | --- | --- |

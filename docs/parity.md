@@ -13,6 +13,7 @@ The tests retain the Bash executable from commit `4fbff7e6d120050204a6989752c61d
 | Human/verbose output and update messages | The executable harness compares normal and colored scans/help/updates, current references, unavailable repositories, and gated updates. |
 | Loading animation and cursor lifecycle | Terminal and CLI tests verify non-CI animation, CI suppression, and cancellation under the race detector. |
 | Major tags, current-tag pins, and non-semver refs | `TestRefPolicies` and the executable harness exercise the update policy. |
+| Multiple products in one repository | Release-family tests keep numeric action refs and their SHA pins separate from named bundle/tool releases, including pagination and fail-closed lookups. |
 | All-page exact tag lookup | `TestSHAAncestryAndAllTags` checks the full stable tag preference across pages. |
 | Ahead/behind/identical/diverged histories | The GitHub tests and executable harness verify the ancestry gate. |
 | Missing releases and tag failures | The executable harness covers default-branch fallback; `TestTagPaginationFailsClosed` rejects partial lookup results. |
@@ -42,3 +43,7 @@ The Go cache uses a new namespace because its raw JSON API representation differ
 ## Validation limits
 
 The local suite uses stored fixtures, local HTTP servers, fake model results, and temporary Git repositories. It does not prove live provider availability, current Marketplace HTML, live GitHub permissions, or a real remote PR publication. The opt-in live AI helper consumes API usage and is separate from the local validation gate.
+
+## Release-family correction
+
+The resolver deliberately corrects the Bash behavior that accepted a repository-wide named-product release as an update for a numeric action reference. For example, `github/codeql-action/init@v4.38.1` must compare against action releases such as `v4.38.2`, rather than `codeql-bundle-v2.27.1`. The dedicated fixtures cover this corrected contract separately from the unchanged Bash oracle.
