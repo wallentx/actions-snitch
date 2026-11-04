@@ -16,8 +16,10 @@ func TestGates(t *testing.T) {
 		ai, force, verified, only, allow, assess bool
 	}{
 		{80, 80, false, false, false, false, true, false}, {79, 80, false, false, true, false, false, false},
-		{70, 50, true, false, true, false, false, false}, {90, 100, true, false, true, false, false, true},
-		{"Unknown", 0, true, false, true, false, false, true}, {"Unknown", 80, true, true, true, false, true, false},
+		{70, 50, true, false, true, false, true, false}, {90, 100, true, false, true, false, false, false},
+		{"Unknown", 0, true, false, true, false, false, false}, {"Unknown", 80, true, true, true, false, false, true},
+		{20, 80, true, true, true, false, false, true}, {20, 80, false, true, true, false, true, false},
+		{70, 50, false, false, true, false, true, false},
 		{100, 80, true, true, false, true, false, false},
 	}
 	for _, c := range cases {

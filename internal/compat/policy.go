@@ -47,23 +47,20 @@ type Decision struct {
 	Reason string
 }
 
-// Gate keeps the score floor independent of the AI invocation threshold.
-// Force never overrides the verified-creator requirement.
+// Gate permits scores at the configured threshold. Below that threshold,
+// force requests an AI investigation when enabled, otherwise a score override.
+// Force never overrides the verified-creator requirement or AI approval.
 func Gate(score any, verified, verifiedOnly, force, ai bool, threshold int) Decision {
 	if verifiedOnly && !verified {
 		return Decision{Reason: "creator is not verified"}
 	}
-	if force {
-		return Decision{Allow: true}
-	}
-	floor := 80
-	if ai && threshold > floor {
-		floor = threshold
-	}
 	n, known := score.(int)
 	known = known && n >= 0 && n <= 100
-	if known && n >= floor {
+	if known && n >= threshold {
 		return Decision{Allow: true}
 	}
-	return Decision{Assess: ai && (!known || n < threshold), Reason: "compatibility requires review"}
+	if force {
+		return Decision{Allow: !ai, Assess: ai, Reason: "compatibility requires review"}
+	}
+	return Decision{Reason: "compatibility requires review"}
 }

@@ -40,7 +40,7 @@ func TestEvidenceFailureDoesNotExposeInvalidScalars(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(r.Dir, ".github/workflows/broken.yml"), []byte("env:\n  API_TOKEN: !!int PRIVATE_SECRET_MARKER\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if code := Run(t.Context(), []string{"-u", "-v", "--debug"}, r); code != 0 {
+	if code := Run(t.Context(), []string{"-uf", "-v", "--debug"}, r); code != 0 {
 		t.Fatal(errOut.String())
 	}
 	if fake.calls != 0 || strings.Contains(out.String()+errOut.String(), "PRIVATE_SECRET_MARKER") {

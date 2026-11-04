@@ -232,11 +232,11 @@ func TestBashGoExecutableParity(t *testing.T) {
 					t.Fatalf("%s: %v\n%s", implementation, err, stderr.String())
 				}
 				out := bytes.ReplaceAll(stdout.Bytes(), []byte(workspace), []byte("<workspace>"))
-				if implementation == "go" && tc.name == "colored-help" {
-					// The Go-only modes extend help; all original help lines retain parity.
+				if tc.name == "colored-help" {
+					// Go-only modes and the AI-aware force policy intentionally extend help.
 					var kept [][]byte
 					for _, line := range bytes.Split(out, []byte("\n")) {
-						if !bytes.Contains(line, []byte("--lint ")) && !bytes.Contains(line, []byte("--debug ")) {
+						if !bytes.Contains(line, []byte("--lint ")) && !bytes.Contains(line, []byte("--debug ")) && !bytes.Contains(line, []byte("  -f    ")) {
 							kept = append(kept, line)
 						}
 					}

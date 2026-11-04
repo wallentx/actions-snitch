@@ -113,14 +113,6 @@ func execute(ctx context.Context, o Options, r Runtime) error {
 	diagnostic.Printf(ctx, "ai enabled=%t provider=%q model=%q effort=%q threshold=%d", cfg.AI.Enabled, cfg.AI.Provider, cfg.AI.Model, cfg.AI.Effort, cfg.AI.Threshold)
 	store := &cache.Store{Dir: config.CachePath(r.Lookup)}
 	ai := llm.Service{Model: r.Model, Config: cfg.AI, Cache: store}
-	if cfg.AI.Enabled && o.Update && !o.Force && ai.Model == nil {
-		provider, endpoint, err := llm.NewProvider(ctx, cfg.AI, r.Lookup)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = llm.Close(provider) }()
-		ai.Model, ai.Endpoint = provider, endpoint
-	}
 	client := r.Client
 	if client == nil {
 		host, _ := r.Lookup("GH_HOST")
@@ -194,6 +186,20 @@ func execute(ctx context.Context, o Options, r Runtime) error {
 	assessments := map[string]model.Assessment{}
 	var applied []update.Applied
 	if o.Update {
+		if ai.Model == nil {
+			for _, f := range findings {
+				if !compat.Gate(f.CompatibilityScore, f.VerifiedCreator, o.VerifiedOnly, o.Force, cfg.AI.Enabled, cfg.AI.Threshold).Assess {
+					continue
+				}
+				provider, endpoint, err := llm.NewProvider(ctx, cfg.AI, r.Lookup)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = llm.Close(provider) }()
+				ai.Model, ai.Endpoint = provider, endpoint
+				break
+			}
+		}
 		planningRuntime := r
 		planningRuntime.Output = io.Discard
 		groups := planGroups(ctx, planningRuntime, o, cfg.AI, client, ai, files, findings, assessments)
@@ -235,11 +241,19 @@ func execute(ctx context.Context, o Options, r Runtime) error {
 		for _, a := range applied {
 			paths = append(paths, a.File)
 		}
-		body := output.PRBody(ctx, client, applied, findings, assessments)
+		changes, err := git.PRChanges(ctx, target)
+		if err != nil {
+			return err
+		}
+		prApplied, err := prUpdates(changes, applied)
+		if err != nil {
+			return err
+		}
+		body := output.PRBody(ctx, client, prApplied, prFindings(findings, prApplied), appliedAssessments(assessments, applied))
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := git.Publish(ctx, target, paths, output.PRTitle(applied), body); err != nil {
+		if err := git.Publish(ctx, target, paths, output.PRTitle(prApplied), body); err != nil {
 			return err
 		}
 	}
@@ -374,7 +388,7 @@ func planGroups(ctx context.Context, r Runtime, o Options, cfg config.AI, client
 		group := update.Group{ActionPath: path, Current: f.Current, Latest: f.Latest, Target: f.UpdateRef}
 		if gate.Assess {
 			diagnostic.Printf(ctx, "collecting evidence action=%q current=%q proposed=%q", path, f.Current, f.Latest)
-			evidence, err := llm.Evidence(ctx, client, files, f, cfg.IssueSearch)
+			evidence, err := llm.Evidence(ctx, client, files, f, cfg.IssueSearch, r.Dir)
 			assessment := llm.Review("Evidence collection failed.")
 			if err == nil {
 				diagnostic.Printf(ctx, "evidence ready bytes=%d", len(evidence))

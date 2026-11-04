@@ -107,10 +107,21 @@ func (c *Client) Releases(ctx context.Context, repo string) ([]Release, error) {
 }
 
 func (c *Client) ReleaseNotes(ctx context.Context, repo, current, latest string) string {
+	var parts []string
+	for _, release := range c.ReleaseEntries(ctx, repo, current, latest) {
+		parts = append(parts, "## "+release.Tag+"\n"+release.Body)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (c *Client) ReleaseEntries(ctx context.Context, repo, current, latest string) []Release {
 	for _, ref := range []string{VersionRef(latest), latest} {
 		var release Release
 		if c.JSON(ctx, "repos/"+repo+"/releases/tags/"+url.PathEscape(ref), &release) == nil && release.Body != "" && release.Body != "null" {
-			return "## " + ref + "\n" + release.Body
+			if release.Tag == "" {
+				release.Tag = ref
+			}
+			return []Release{release}
 		}
 		if ref == latest {
 			break
@@ -118,20 +129,20 @@ func (c *Client) ReleaseNotes(ctx context.Context, repo, current, latest string)
 	}
 	from, to := Major(current), Major(latest)
 	if from == "" || to == "" {
-		return ""
+		return nil
 	}
 	releases, err := c.Releases(ctx, repo)
 	if err != nil {
-		return ""
+		return nil
 	}
-	var parts []string
+	var selected []Release
 	for _, r := range releases {
 		major := Major(strings.TrimPrefix(r.Tag, "v"))
 		if major != "" && numericLess(from, major) && !numericLess(to, major) {
-			parts = append(parts, "## "+r.Tag+"\n"+r.Body)
+			selected = append(selected, r)
 		}
 	}
-	return strings.Join(parts, "\n")
+	return selected
 }
 
 func numericLess(a, b string) bool {

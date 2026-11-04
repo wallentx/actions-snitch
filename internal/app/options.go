@@ -26,7 +26,7 @@ Options:
   -c    Interactively create the config file, then exit (use alone)
   -u    Update outdated actions in-place
   -s    Pin updates to full commit SHAs (scan without -u to preview)
-  -f    Force updates regardless of compatibility score (requires -u or -p)
+  -f    Override the score gate; enabled AI must approve and validate repairs (requires -u or -p)
   -p    Commit, push, and create a pull request after updating actions (implies -u)
   -b    Branch to update or create before applying changes (requires -u or -p)
   -o    Output findings as json, md, or yaml

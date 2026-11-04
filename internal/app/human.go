@@ -87,7 +87,7 @@ func renderUpdates(w io.Writer, t *humanTranscript, style output.Style, o Option
 		if assessed {
 			_, _ = writeHumanLine(&b, style, "      AI assessment: %s\n", llm.SafeSummary(assessment.Summary))
 			if assessment.Decision != "allow" {
-				_, _ = writeHumanLine(&b, style, "      Skipping update of %s to v%s after AI decision '%s'. Use -f to force.\n", f.Repository, f.Latest, assessment.Decision)
+				_, _ = writeHumanLine(&b, style, "      Skipping update of %s to v%s after AI decision '%s'.\n", f.Repository, f.Latest, assessment.Decision)
 				continue
 			}
 		}
@@ -111,8 +111,12 @@ func renderUpdates(w io.Writer, t *humanTranscript, style output.Style, o Option
 				_, _ = writeHumanLine(&b, style, "      Updated %s from %s to %s\n", path, f.Current, target)
 			}
 		} else if assessed && !remediated[key] && len(assessment.Remediations) > 0 {
-			_, _ = writeHumanLine(&b, style, "      Skipping update of %s because its AI remediation could not be safely validated and applied. Use -f to force.\n", f.Repository)
+			_, _ = writeHumanLine(&b, style, "      Skipping update of %s because its AI remediation could not be safely validated and applied.\n", f.Repository)
 		} else if !gate.Allow && !assessed {
+			if cfg.Enabled {
+				_, _ = writeHumanLine(&b, style, "      Skipping update of %s because its compatibility score does not meet the configured threshold (%d%%). Use -f to request an AI investigation.\n", f.Repository, cfg.Threshold)
+				continue
+			}
 			if score, known := f.CompatibilityScore.(int); known {
 				_, _ = writeHumanLine(&b, style, "      Skipping update of %s to v%s due to low compatibility score (%d%%). Enable AI analysis or use -f to force.\n", f.Repository, f.Latest, score)
 			} else {

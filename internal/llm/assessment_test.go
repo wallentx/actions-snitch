@@ -19,7 +19,8 @@ import (
 	"github.com/wallentx/actions-snitch/internal/workflow"
 )
 
-const validAssessment = `{"decision":"allow","confidence":"high","summary":"Inputs are compatible.","findings":[],"remediations":[]}`
+const validFindings = `[{"caution_detail":"The runtime changed.","safety":"The configured runner supports it.","evidence":"workflow"}]`
+const validAssessment = `{"decision":"allow","confidence":"high","summary":"Inputs are compatible.","findings":` + validFindings + `,"remediations":[]}`
 
 func TestStrictAssessmentSchema(t *testing.T) {
 	if _, err := Validate([]byte(validAssessment)); err != nil {
@@ -27,7 +28,10 @@ func TestStrictAssessmentSchema(t *testing.T) {
 	}
 	invalid := []string{
 		`null`, `{}`, strings.Replace(validAssessment, `"high"`, `"low"`, 1),
-		strings.Replace(validAssessment, `"findings":[]`, `"findings":null`, 1),
+		strings.Replace(validAssessment, validFindings, `null`, 1),
+		strings.Replace(validAssessment, validFindings, `[]`, 1),
+		strings.Replace(validAssessment, `The runtime changed.`, ` `, 1),
+		strings.Replace(validAssessment, `The configured runner supports it.`, ``, 1),
 		strings.Replace(validAssessment, `"summary":`, `"unknown":true,"summary":`, 1),
 		strings.Replace(validAssessment, `"decision":"allow"`, `"decision":"block","decision":"allow"`, 1),
 		validAssessment + ` {}`, strings.Replace(validAssessment, `"Inputs are compatible."`, `"`+strings.Repeat("x", 601)+`"`, 1),
@@ -228,7 +232,7 @@ func TestEvidenceRequiredDefinitionsAndImplementation(t *testing.T) {
 	client.PublicHTTP = server.Client()
 	u := file.Usages[0]
 	finding := model.Finding{Action: u.Action, Repository: u.Repository, Current: u.Current, Latest: "1.0.0", CompatibilityScore: "Unknown"}
-	b, err := Evidence(context.Background(), client, []*workflow.File{file}, finding, "never")
+	b, err := Evidence(context.Background(), client, []*workflow.File{file}, finding, "never", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +240,7 @@ func TestEvidenceRequiredDefinitionsAndImplementation(t *testing.T) {
 		t.Fatalf("missing bounded evidence: %s", b)
 	}
 	missing = true
-	if _, err := Evidence(context.Background(), client, []*workflow.File{file}, finding, "never"); err == nil {
+	if _, err := Evidence(context.Background(), client, []*workflow.File{file}, finding, "never", t.TempDir()); err == nil {
 		t.Fatal("missing required definitions allowed")
 	}
 }

@@ -177,10 +177,11 @@ type Tag struct {
 	} `json:"commit"`
 }
 type Compare struct {
-	Status  string          `json:"status"`
-	Ahead   json.RawMessage `json:"ahead_by"`
-	Behind  json.RawMessage `json:"behind_by"`
-	Commits []Commit        `json:"commits"`
+	TotalCommits int             `json:"total_commits"`
+	Status       string          `json:"status"`
+	Ahead        json.RawMessage `json:"ahead_by"`
+	Behind       json.RawMessage `json:"behind_by"`
+	Commits      []Commit        `json:"commits"`
 }
 type Commit struct {
 	SHA    string `json:"sha"`

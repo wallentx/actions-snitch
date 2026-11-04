@@ -118,7 +118,7 @@ func implementation(ctx context.Context, client *github.Client, repo, ref, actio
 	return result
 }
 
-func Evidence(ctx context.Context, client *github.Client, files []*workflow.File, f model.Finding, issuePolicy string) ([]byte, error) {
+func Evidence(ctx context.Context, client *github.Client, files []*workflow.File, f model.Finding, issuePolicy, root string) ([]byte, error) {
 	actionPath := strings.SplitN(f.Action, "@", 2)[0]
 	var usages []UsageEvidence
 	for _, file := range files {
@@ -165,9 +165,10 @@ func Evidence(ctx context.Context, client *github.Client, files []*workflow.File
 		issues, _ = client.Issues(ctx, f.Repository, f.Latest)
 	}
 	evidence := map[string]any{
-		"upgrade":      map[string]any{"repository": f.Repository, "action_path": actionPath, "current": f.Current, "proposed": f.Latest, "compatibility_score": fmt.Sprint(f.CompatibilityScore)},
-		"local_usages": usages,
-		"upstream":     map[string]any{"releases": github.LimitCharacters(github.JSONText(releases), 16000), "changelog": github.LimitCharacters(changelog, 16000), "commits": github.LimitCharacters(github.JSONText(comparison.Commits), 8000), "issues": github.LimitCharacters(github.JSONText(issues), 10000), "current_action_definition": current, "proposed_action_definition": proposed, "current_action_implementation": implementation(ctx, client, f.Repository, currentRef, actionPath, current), "proposed_action_implementation": implementation(ctx, client, f.Repository, proposedRef, actionPath, proposed)},
+		"upgrade":             map[string]any{"repository": f.Repository, "action_path": actionPath, "current": f.Current, "proposed": f.Latest, "compatibility_score": fmt.Sprint(f.CompatibilityScore)},
+		"local_usages":        usages,
+		"local_version_files": localVersionFiles(root, files, actionPath, f.Current),
+		"upstream":            map[string]any{"releases": github.LimitCharacters(github.JSONText(releases), 16000), "changelog": github.LimitCharacters(changelog, 16000), "commits": github.LimitCharacters(github.JSONText(comparison.Commits), 8000), "issues": github.LimitCharacters(github.JSONText(issues), 10000), "current_action_definition": current, "proposed_action_definition": proposed, "current_action_implementation": implementation(ctx, client, f.Repository, currentRef, actionPath, current), "proposed_action_implementation": implementation(ctx, client, f.Repository, proposedRef, actionPath, proposed)},
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

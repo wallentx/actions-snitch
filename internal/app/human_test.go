@@ -90,9 +90,9 @@ func TestGroupedUpdateIntegration(t *testing.T) {
 	if err := os.WriteFile(second, []byte("steps:\n  - uses: owner/action@v1\n  - uses: owner/action@v1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	fake := &assessmentModel{response: `{"decision":"allow","confidence":"high","summary":"Shared decision.","findings":[],"remediations":[]}`}
+	fake := &assessmentModel{response: `{"decision":"allow","confidence":"high","summary":"Shared decision.","findings":[{"caution_detail":"The runtime changed.","safety":"The runner supports it.","evidence":"workflow"}],"remediations":[]}`}
 	r.Model = fake
-	if code := Run(t.Context(), []string{"-u"}, r); code != 0 {
+	if code := Run(t.Context(), []string{"-uf"}, r); code != 0 {
 		t.Fatal(errOut.String())
 	}
 	if fake.calls != 1 || strings.Count(out.String(), "AI assessment:") != 1 || !strings.Contains(out.String(), "Updated 3 reference(s) for owner/action") {

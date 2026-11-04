@@ -64,6 +64,16 @@ func Validate(data []byte) (model.Assessment, error) {
 	if assessment.Decision == "allow" && assessment.Confidence == "low" {
 		return assessment, errors.New("low-confidence allow requires review")
 	}
+	if assessment.Decision == "allow" {
+		if len(assessment.Findings) == 0 {
+			return assessment, errors.New("approval requires compatibility and safety evidence")
+		}
+		for _, finding := range assessment.Findings {
+			if strings.TrimSpace(finding.Detail) == "" || strings.TrimSpace(finding.Safety) == "" {
+				return assessment, errors.New("approval requires nonempty caution and safety details")
+			}
+		}
+	}
 	if assessment.Decision != "allow" && len(assessment.Remediations) > 0 {
 		return assessment, errors.New("only allow may propose remediation")
 	}

@@ -119,17 +119,19 @@ func TestAIUpdateSafetyIntegration(t *testing.T) {
 		wantRef                                  string
 		calls                                    int
 	}{
-		{"allow", "allow", false, true, false, false, "v2", 1},
-		{"review", "review", false, true, false, false, "v1", 1},
-		{"bad-remediation", "allow", true, true, false, false, "v1", 1},
-		{"missing-evidence", "allow", false, false, false, false, "v1", 0},
-		{"force-bypass", "allow", true, false, true, false, "v2", 0},
+		{"allow", "allow", false, true, true, false, "v2", 1},
+		{"review", "review", false, true, true, false, "v1", 1},
+		{"block", "block", false, true, true, false, "v1", 1},
+		{"bad-remediation", "allow", true, true, true, false, "v1", 1},
+		{"missing-evidence", "allow", false, false, true, false, "v1", 0},
+		{"score-gate-without-force", "allow", false, true, false, false, "v1", 0},
 		{"creator-gate", "allow", false, true, true, true, "v1", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, _, errOut := fixtureRuntime(t, "20", false, tc.definitions)
 			assessment := model.Assessment{Decision: tc.decision, Confidence: "high", Summary: "Fixture decision.", Findings: []model.Caution{}, Remediations: []model.Remediation{}}
 			if tc.decision == "allow" {
+				assessment.Findings = []model.Caution{{Detail: "The input mode changed.", Safety: "The proposed input restores compatibility.", Evidence: "action_definition"}}
 				input, current := "mode", "old"
 				if tc.unsafe {
 					input, current = "githubToken", "hidden-token"
@@ -161,9 +163,6 @@ func TestAIUpdateSafetyIntegration(t *testing.T) {
 			}
 			if strings.Contains(fake.prompt, "hidden-env") || strings.Contains(fake.prompt, "hidden-token") {
 				t.Fatal("secret sent to model")
-			}
-			if tc.force && strings.Contains(string(data), "mode: safe") {
-				t.Fatal("force applied remediation")
 			}
 			if tc.name == "allow" && !strings.Contains(string(data), "mode: safe") {
 				t.Fatal("remediation not applied")
@@ -200,10 +199,13 @@ func TestSetupCancellationAndExclusiveCreation(t *testing.T) {
 	}
 }
 
-func TestForceDoesNotValidateProviderEffortOrModel(t *testing.T) {
+func TestForceWithoutAIDoesNotValidateProviderEffortOrModel(t *testing.T) {
 	r, _, errOut := fixtureRuntime(t, "Unknown", false, false)
 	lookup := r.Lookup
 	r.Lookup = func(key string) (string, bool) {
+		if key == "ACTIONS_SNITCH_AI" {
+			return "false", true
+		}
 		if key == "ACTIONS_SNITCH_AI_EFFORT" {
 			return "legacy-ultra", true
 		}
@@ -221,6 +223,33 @@ func TestForceDoesNotValidateProviderEffortOrModel(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "owner/action@v2") {
 		t.Fatal("force did not update")
+	}
+}
+
+func TestNormalUpdateUsesConfiguredScoreWithoutCallingProvider(t *testing.T) {
+	for _, tc := range []struct{ score, threshold, want string }{
+		{"90", "80", "v2"}, {"70", "50", "v2"}, {"70", "80", "v1"}, {"Unknown", "80", "v1"},
+	} {
+		t.Run(tc.score+"/"+tc.threshold, func(t *testing.T) {
+			r, _, errOut := fixtureRuntime(t, tc.score, true, true)
+			lookup := r.Lookup
+			r.Lookup = func(key string) (string, bool) {
+				if key == "ACTIONS_SNITCH_AI_THRESHOLD" {
+					return tc.threshold, true
+				}
+				if key == "ACTIONS_SNITCH_AI_EFFORT" {
+					return "invalid-if-provider-is-created", true
+				}
+				return lookup(key)
+			}
+			if code := Run(t.Context(), []string{"-u", "-o", "json"}, r); code != 0 {
+				t.Fatal(errOut.String())
+			}
+			data, err := os.ReadFile(filepath.Join(r.Dir, ".github/workflows/main.yml"))
+			if err != nil || !strings.Contains(string(data), "owner/action@"+tc.want) {
+				t.Fatalf("data=%s err=%v", data, err)
+			}
+		})
 	}
 }
 
@@ -267,7 +296,7 @@ func TestUnreadableLocalEvidenceFailsClosed(t *testing.T) {
 	}
 	fake := &assessmentModel{response: `{"decision":"allow","confidence":"high","summary":"safe","findings":[],"remediations":[]}`}
 	r.Model = fake
-	if code := Run(context.Background(), []string{"-u"}, r); code != 0 {
+	if code := Run(context.Background(), []string{"-uf"}, r); code != 0 {
 		t.Fatal(errOut.String())
 	}
 	for _, want := range []string{"Evidence collection failed:", ".github/workflows/broken.yml", "yaml:"} {
@@ -293,7 +322,7 @@ func TestMissingDefinitionDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := Run(t.Context(), []string{"-u"}, r); code != 0 {
+	if code := Run(t.Context(), []string{"-uf"}, r); code != 0 {
 		t.Fatal(errOut.String())
 	}
 	for _, want := range []string{"Evidence collection failed: current action definition:", "owner/action@v1", "action.yml: HTTP status 404", "action.yaml: HTTP status 404"} {

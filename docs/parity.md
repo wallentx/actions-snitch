@@ -17,7 +17,7 @@ The tests retain the Bash executable from commit `4fbff7e6d120050204a6989752c61d
 | All-page exact tag lookup | `TestSHAAncestryAndAllTags` checks the full stable tag preference across pages. |
 | Ahead/behind/identical/diverged histories | The GitHub tests and executable harness verify the ancestry gate. |
 | Missing releases and tag failures | The executable harness covers default-branch fallback; `TestTagPaginationFailsClosed` rejects partial lookup results. |
-| Unknown compatibility and threshold floor | `TestGates`, `TestScore`, and `TestAmbiguousBadgeFailsClosed` enforce the policy. |
+| Unknown compatibility and configured threshold | `TestGates`, `TestScore`, and `TestAmbiguousBadgeFailsClosed` enforce the policy. |
 | Verified creators overriding force | The executable harness and `TestAIUpdateSafetyIntegration` verify that no model or update bypasses the creator gate. |
 | Source layout and permissions | Layout tests check exact LF/CRLF/no-final-newline bytes and mode `0640`; metadata tests check read-only protection, xattrs, ACLs, and inherited-ACL exclusion. |
 | Multiple documents and Unicode | `TestUnicodeFlowAndDocuments` checks source-span edits. |
@@ -27,7 +27,7 @@ The tests retain the Bash executable from commit `4fbff7e6d120050204a6989752c61d
 | Schema and cached assessment validation | `TestStrictAssessmentSchema` and `TestAssessmentCacheAndFailures` check the fail-closed response boundary. |
 | Secret redaction and required evidence | `TestRedaction`, `TestEvidenceRequiredDefinitionsAndImplementation`, and integrated AI tests check the supplied context. |
 | Direct provider requests | HTTP fixtures exercise OpenAI, Anthropic thinking blocks, Gemini streamed arrays on Go 1.26/1.27, and Ollama completion/tool metadata. |
-| Force bypass | `TestForceDoesNotValidateProviderEffortOrModel` and integrated tests verify that force collects no AI evidence and applies no remediation. |
+| AI-aware force | `TestForceWithoutAIDoesNotValidateProviderEffortOrModel` covers the AI-disabled override. Integrated tests require AI approval and validated remediation when AI is enabled. |
 | Config precedence and private setup | The config and setup tests cover aliases, environment overrides, cancellation, exclusive creation, and permissions. |
 | PR destination and staged scope | Git tests verify push-origin selection, failed preflight, scoped publishing, and preservation of unrelated index state. |
 | HTTP/cache isolation | GitHub tests cover hostile pagination, public requests without credentials, auth-scoped caching, and corrupt entries. |
@@ -43,6 +43,8 @@ The Go cache uses a new namespace because its raw JSON API representation differ
 ## Validation limits
 
 The local suite uses stored fixtures, local HTTP servers, fake model results, and temporary Git repositories. It does not prove live provider availability, current Marketplace HTML, live GitHub permissions, or a real remote PR publication. The opt-in live AI helper consumes API usage and is separate from the local validation gate.
+
+The AI-aware force policy intentionally differs from the Bash oracle: normal updates use the configured score threshold, and `-f` invokes enabled AI for low or unknown scores. It cannot bypass the AI decision. PR descriptions include committed branch updates as well as changes made by the current invocation.
 
 ## Release-family correction
 

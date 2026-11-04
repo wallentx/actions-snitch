@@ -3,6 +3,7 @@ package output
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/wallentx/actions-snitch/internal/github"
@@ -21,6 +22,9 @@ func PRTitle(applied []update.Applied) string {
 	}
 	if total == 1 {
 		g := applied[0].Group
+		if g.Current == "" {
+			return fmt.Sprintf("Add %s@%s", g.ActionPath, g.Target)
+		}
 		return fmt.Sprintf("Bump %s from %s to %s", g.ActionPath, g.Current, g.Latest)
 	}
 	return "Bump GitHub Actions dependencies"
@@ -28,12 +32,27 @@ func PRTitle(applied []update.Applied) string {
 
 func details(b *strings.Builder, title, source, body string) {
 	_, _ = fmt.Fprintf(b, "<details>\n<summary>%s</summary>\n\n_%s_\n\n", title, source)
+	quoteBody(b, body)
+	b.WriteString("\n</details>\n\n")
+}
+
+func quoteBody(b *strings.Builder, body string) {
+	body = strings.ReplaceAll(body, "\r\n", "\n")
 	for _, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
 		if line == "" {
 			b.WriteString(">\n")
 		} else {
 			_, _ = fmt.Fprintf(b, "> %s\n", line)
 		}
+	}
+}
+
+func releaseDetails(b *strings.Builder, releases []github.Release) {
+	b.WriteString("<details>\n<summary>Release notes</summary>\n\n")
+	for _, release := range releases {
+		_, _ = fmt.Fprintf(b, "### %s\n", htmlSafe(release.Tag))
+		quoteBody(b, release.Body)
+		b.WriteByte('\n')
 	}
 	b.WriteString("</details>\n\n")
 }
@@ -76,10 +95,16 @@ func PRBody(ctx context.Context, client *github.Client, applied []update.Applied
 		repo := repoOf(g.ActionPath)
 		base := "https://github.com/" + repo
 		_, _ = fmt.Fprintf(&b, "## [%s](%s)\n\n", g.ActionPath, base)
-		_, _ = fmt.Fprintf(&b, "Updates `%s` from %s to %s", g.ActionPath, g.Current, g.Latest)
-		if a.Count > 1 {
-			_, _ = fmt.Fprintf(&b, " across %d workflow entries", a.Count)
+		if g.Current == "" {
+			_, _ = fmt.Fprintf(&b, "Adds `%s@%s`", g.ActionPath, g.Target)
+		} else {
+			_, _ = fmt.Fprintf(&b, "Updates `%s` from %s to %s", g.ActionPath, g.Current, g.Latest)
 		}
+		entryWord := "entries"
+		if a.Count == 1 {
+			entryWord = "entry"
+		}
+		_, _ = fmt.Fprintf(&b, " across %d workflow %s", a.Count, entryWord)
 		b.WriteString(".\n\n")
 		for _, f := range findings {
 			if strings.SplitN(f.Action, "@", 2)[0] == g.ActionPath && f.Current == g.Current && f.Latest == g.Latest && f.LatestSHA != nil {
@@ -95,9 +120,24 @@ func PRBody(ctx context.Context, client *github.Client, applied []update.Applied
 		}
 		if assessment, ok := assessments[AssessmentKey(g.ActionPath, g.Current, g.Latest)]; ok {
 			investigation(&b, assessment)
+		} else {
+			// A current-run investigation may cover only the last stage of a
+			// multi-commit upgrade. Preserve it with its actual version scope.
+			var keys []string
+			for key := range assessments {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				parts := strings.Split(key, "\x00")
+				if len(parts) == 3 && parts[0] == g.ActionPath && parts[2] == g.Latest {
+					scope := fmt.Sprintf("This investigation covers the branch update from %s to %s; it does not assess earlier changes in the branch.", parts[1], parts[2])
+					investigationScope(&b, assessments[key], scope)
+				}
+			}
 		}
-		if notes := client.ReleaseNotes(ctx, repo, g.Current, g.Latest); notes != "" {
-			details(&b, "Release notes", fmt.Sprintf("Sourced from [%s's releases](%s/releases).", repo, base), notes)
+		if releases := client.ReleaseEntries(ctx, repo, g.Current, g.Latest); len(releases) > 0 {
+			releaseDetails(&b, releases)
 		} else {
 			details(&b, "Release notes", fmt.Sprintf("No release notes were found in [%s's releases](%s/releases).", repo, base), "actions-snitch could not find release notes for "+github.VersionRef(g.Latest)+".")
 		}
@@ -106,12 +146,16 @@ func PRBody(ctx context.Context, client *github.Client, applied []update.Applied
 		} else {
 			details(&b, "Changelog", "No changelog file was found for "+repo+".", "actions-snitch looked for CHANGELOG.md, changelog.md, CHANGES.md, and HISTORY.md.")
 		}
+		if g.Current == "" {
+			details(&b, "Commits", "This action reference is new in the PR.", fmt.Sprintf("See the [commit history](%s/commits/%s).", base, github.VersionRef(g.Latest)))
+			continue
+		}
 		compareURL := base + "/compare/" + github.VersionRef(g.Current) + "..." + github.VersionRef(g.Latest)
 		comparison, err := client.Compare(ctx, repo, github.VersionRef(g.Current), github.VersionRef(g.Latest))
 		if err == nil && len(comparison.Commits) > 0 {
 			var lines strings.Builder
 			for i, c := range comparison.Commits {
-				if i >= 10 {
+				if i >= 30 {
 					break
 				}
 				sha := c.SHA
@@ -119,6 +163,9 @@ func PRBody(ctx context.Context, client *github.Client, applied []update.Applied
 					sha = sha[:7]
 				}
 				_, _ = fmt.Fprintf(&lines, "- [`%s`](%s) %s\n", sha, c.URL, strings.SplitN(c.Commit.Message, "\n", 2)[0])
+			}
+			if omitted := max(comparison.TotalCommits, len(comparison.Commits)) - min(30, len(comparison.Commits)); omitted > 0 {
+				_, _ = fmt.Fprintf(&lines, "- ... and %d more commits.\n", omitted)
 			}
 			_, _ = fmt.Fprintf(&lines, "See full diff in [compare view](%s).", compareURL)
 			details(&b, "Commits", fmt.Sprintf("Sourced from [%s's commit history](%s).", repo, compareURL), lines.String())
@@ -140,7 +187,14 @@ func repoOf(path string) string {
 }
 
 func investigation(b *strings.Builder, a model.Assessment) {
+	investigationScope(b, a, "")
+}
+
+func investigationScope(b *strings.Builder, a model.Assessment, scope string) {
 	b.WriteString("<details>\n<summary>Investigation: Compatibility & Safety Details</summary>\n\n")
+	if scope != "" {
+		_, _ = fmt.Fprintf(b, "%s\n\n", htmlSafe(scope))
+	}
 	for _, f := range a.Findings {
 		_, _ = fmt.Fprintf(b, "* **Caution Detail:** %s\n* **Safety:** %s\n", htmlSafe(f.Detail), htmlSafe(f.Safety))
 	}

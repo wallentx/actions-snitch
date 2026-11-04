@@ -29,7 +29,7 @@ The command scans the current directory. These options retain their existing mea
 | `-c` | The command creates a configuration interactively and exits. This option must appear alone. |
 | `-u` | The command updates eligible references in place. |
 | `-s` | The command proposes full SHA pins, including pins for already-current release tags. |
-| `-f` | The command bypasses compatibility and AI assessment. This option requires `-u` or `-p`. |
+| `-f` | The command overrides the score gate. Enabled AI must investigate and approve low-score updates; disabled AI permits them directly. This option requires `-u` or `-p`. |
 | `-p` | The command updates, commits, pushes to origin, and creates a PR. |
 | `-b branch` | The command switches to or creates this branch before updating. This option requires `-u` or `-p`. |
 | `-o json\|md\|yaml` | The command prints findings in the selected structured format. |
@@ -84,11 +84,11 @@ Human and Markdown reports mark Marketplace verified creators with `☑️`. JSO
 
 Structured output groups findings under the scanned repository name and prints nothing when there are no findings. Every finding includes `file`, `line`, `action`, `repository`, `current`, `latest`, `current_tag`, `latest_sha`, `commits_since`, `update_ref`, `compatibility_score`, `verified_creator`, and `release_notes`. Unavailable SHA metadata and release-note links are `null` in JSON/YAML. Markdown links the repository heading to its origin remote when available.
 
-A known compatibility score of at least 80 normally permits an update. Unknown, invalid, or lower scores require AI approval or `-f`. Raising the enabled AI threshold raises the review threshold; lowering it never lowers the score floor of 80. A badge containing conflicting scores is treated as unknown.
+A known compatibility score at or above the configured threshold permits an update. The threshold defaults to 80. Unknown, invalid, or lower scores are skipped unless `-f` is supplied. With AI enabled, `-f` requests an investigation and requires approval; with AI disabled, it permits the score override directly. A badge containing conflicting scores is treated as unknown.
 
 ## AI-assisted updates
 
-AI is disabled by default. Enabled AI runs only during updates that require assessment. The integration calls provider APIs directly through langchaingo and does not launch provider CLIs, grant model tools, or execute repository evidence.
+AI is disabled by default. Enabled AI investigates below-threshold or unknown-score updates when `-f` is supplied. The integration calls provider APIs directly through langchaingo and does not launch provider CLIs, grant model tools, or execute repository evidence.
 
 | Provider setting | Credential environment | Legacy alias |
 | --- | --- | --- |
@@ -130,19 +130,21 @@ The pinned Anthropic adapter supports `ai.effort: low|medium|high` for models it
 
 The evidence includes complete redacted local documents, current and proposed action definitions, release notes, changelogs, compare commits, and optional issue results. All `env` values, sensitive `with` inputs, and references to the secrets context are redacted. Composite evidence includes at most four referenced implementation files per version, with a 12,000-character bound per file and explicit missing/truncated/omitted indicators. The command reads this source without executing it.
 
-Every response must satisfy the assessment schema and return `allow`, `review`, or `block`. Unknown fields, duplicate keys, incomplete responses, unauthorized tool requests, low-confidence approval, missing required evidence, and provider errors fail closed. Cached assessments undergo the same validation.
+Every response must satisfy the assessment schema and return `allow`, `review`, or `block`. Approval also requires nonempty caution and safety findings for the PR investigation. Unknown fields, duplicate keys, incomplete responses, unauthorized tool requests, low-confidence approval, missing required evidence, and provider errors fail closed. Cached assessments undergo the same validation.
+
+For literal `go-version-file` inputs pointing to repository-local `go.mod` or `go.work` files, evidence includes bounded Go and toolchain version directives. It excludes module paths, dependencies, comments, and arbitrary file contents. Dynamic paths, symlinks, paths outside the repository, oversized files, and ambiguous declarations remain unavailable evidence. The model must request review when the available evidence cannot establish compatibility.
 
 An approved remediation can only set or remove non-sensitive scalar `with` inputs on the exact affected action mapping. Validation checks the scanned file, original line, full action path, current version, input name, and exact current value. Arbitrary YAML patches, permissions, triggers, environment variables, shell commands, cross-action changes, and sensitive inputs are rejected.
 
 The planner validates changes against immutable source snapshots, prepares all affected files, and checks the complete resulting YAML before publishing. Version-only edits preserve layout, comments, quoting, line endings, and final-newline state. Changes that would affect unrelated alias consumers fail closed. Publication checks write permission and rejects source files changed since scanning. On Linux and macOS, it preserves ownership, permissions, ACLs, and extended attributes; metadata that cannot be preserved causes the update to fail before publication. Linux uses atomic per-file replacement. macOS writes into the existing inode to preserve its native ACLs, matching the original copy behavior. Both paths attempt rollback after a publication failure, and an unsuccessful rollback retains a recovery backup whose path appears in the error. Cross-file publication is not a filesystem-wide atomic transaction.
 
-Forced updates bypass the model and evidence collection entirely. They apply no AI remediation and still respect verified-creator, ancestry, and SHA-resolution gates.
+With AI enabled, forced low-score updates require a validated `allow` decision. Supported input remediations are validated and applied with the version change. A `review` or `block` decision, missing evidence, provider failure, or unsafe remediation leaves the action unchanged. With AI disabled, force bypasses evidence collection and applies no AI remediation. Both modes respect verified-creator, ancestry, and SHA-resolution gates.
 
 ## Branches and pull requests
 
 Plain `-u` permits existing local changes and can run outside a Git repository. Branch switching requires a clean worktree. PR mode requires a clean worktree and resolves origin's push URL and that repository's default branch before changing branches or files. A fork push URL therefore keeps the PR in the fork. Interactive PR mode can prompt for a branch when `-b` is absent.
 
-PR mode stages only successfully updated files, commits once, pushes to origin, and creates the PR with an explicit repository, head, and base. It refuses unrelated staged work. The body deduplicates repeated updates and includes release notes, changelog and commit details, compatibility badges, SHA metadata, and validated AI investigation/remediation details where applicable.
+PR mode stages only successfully updated files, commits once, pushes to origin, and creates the PR with an explicit repository, head, and base. It refuses unrelated staged work. The title and body describe the action-version diff against the fetched PR merge base, including updates already committed on the branch and references in added or renamed workflows. The body deduplicates repeated updates and includes release notes, changelog and commit details, compatibility badges, SHA metadata, and validated AI investigation/remediation details where applicable. Release headings and investigation sections follow the [TractorOS reference](https://github.com/FarmGPU/TractorOS/pull/3). Only successfully applied current-run assessments are included. If an investigation covers only the last stage of a multi-commit upgrade, its actual version range is stated explicitly instead of implying that earlier changes were investigated.
 
 ## Cache and GitHub hosts
 

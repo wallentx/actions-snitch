@@ -58,9 +58,10 @@ type Service struct {
 	Output io.Writer
 }
 type Target struct {
-	URL    string
-	Base   string
-	Branch string
+	URL          string
+	Base         string
+	Branch       string
+	BaseRevision string
 }
 
 func (s Service) run(ctx context.Context, name string, args ...string) (string, error) {
@@ -112,6 +113,13 @@ func (s Service) Prepare(ctx context.Context, pr bool, branch string) (Target, e
 			return target, errors.New("origin's repository must have a URL and a default branch for PR creation")
 		}
 		target.URL, target.Base = repo.URL, repo.DefaultBranch.Name
+		if _, err := s.run(ctx, "git", "fetch", "--no-tags", "--", pushURL, "refs/heads/"+target.Base); err != nil {
+			return target, fmt.Errorf("could not fetch the PR base: %w", err)
+		}
+		target.BaseRevision, err = s.run(ctx, "git", "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+		if err != nil {
+			return target, err
+		}
 	}
 	if pr || branch != "" {
 		current, err := s.Branch(ctx)
