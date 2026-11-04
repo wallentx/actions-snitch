@@ -12,7 +12,8 @@ TEST_FLAGS ?=
 ARGS ?= -h
 GO_LDFLAGS ?= -s -w
 TOOLS_BIN ?= $(CURDIR)/.tools/bin
-GOSEC_GOTOOLCHAIN ?= go1.26.6
+ANALYZER_GOTOOLCHAIN ?= go1.26.6
+GOSEC_GOTOOLCHAIN ?= $(ANALYZER_GOTOOLCHAIN)
 COVERAGE_FILE ?= coverage.out
 COVERAGE_HTML ?= coverage.html
 DIST_DIR ?= dist
@@ -213,11 +214,11 @@ vet: ## Run go vet.
 
 staticcheck: $(STATICCHECK) ## Run staticcheck.
 	$(call PRINT_STEP,Running staticcheck.)
-	@"$(STATICCHECK)" $(PKGS)
+	@GOTOOLCHAIN="$(ANALYZER_GOTOOLCHAIN)" "$(STATICCHECK)" $(PKGS)
 
 golangci-lint: $(GOLANGCI_LINT) ## Run the repository's golangci-lint configuration.
 	$(call PRINT_STEP,Running golangci-lint.)
-	@"$(GOLANGCI_LINT)" run
+	@GOTOOLCHAIN="$(ANALYZER_GOTOOLCHAIN)" "$(GOLANGCI_LINT)" run
 
 security: gosec govulncheck ## Run source-security analysis and live vulnerability checks.
 
@@ -227,7 +228,7 @@ gosec: $(GOSEC) ## Run gosec with its compatible Go toolchain.
 
 govulncheck: $(GOVULNCHECK) ## Check reachable vulnerabilities using the public Go vulnerability database.
 	$(call PRINT_STEP,Running govulncheck.)
-	@"$(GOVULNCHECK)" -test ./...
+	@GOTOOLCHAIN="$(ANALYZER_GOTOOLCHAIN)" "$(GOVULNCHECK)" -test ./...
 
 tools: $(GOIMPORTS) $(STATICCHECK) $(GOLANGCI_LINT) $(GOSEC) $(GOVULNCHECK) ## Install pinned analysis tools into TOOLS_BIN.
 
@@ -235,19 +236,19 @@ $(TOOLS_BIN):
 	@mkdir -p "$@"
 
 $(TOOLS_BIN)/goimports: Makefile | $(TOOLS_BIN)
-	@GOBIN="$(TOOLS_BIN)" $(GO) install $(GOIMPORTS_PKG)
+	@GOTOOLCHAIN="$(ANALYZER_GOTOOLCHAIN)" GOBIN="$(TOOLS_BIN)" $(GO) install $(GOIMPORTS_PKG)
 
 $(TOOLS_BIN)/staticcheck: Makefile | $(TOOLS_BIN)
-	@GOBIN="$(TOOLS_BIN)" $(GO) install $(STATICCHECK_PKG)
+	@GOTOOLCHAIN="$(ANALYZER_GOTOOLCHAIN)" GOBIN="$(TOOLS_BIN)" $(GO) install $(STATICCHECK_PKG)
 
 $(TOOLS_BIN)/golangci-lint: Makefile | $(TOOLS_BIN)
-	@GOBIN="$(TOOLS_BIN)" $(GO) install $(GOLANGCI_LINT_PKG)
+	@GOTOOLCHAIN="$(ANALYZER_GOTOOLCHAIN)" GOBIN="$(TOOLS_BIN)" $(GO) install $(GOLANGCI_LINT_PKG)
 
 $(TOOLS_BIN)/gosec: Makefile | $(TOOLS_BIN)
-	@GOBIN="$(TOOLS_BIN)" $(GO) install $(GOSEC_PKG)
+	@GOTOOLCHAIN="$(GOSEC_GOTOOLCHAIN)" GOBIN="$(TOOLS_BIN)" $(GO) install $(GOSEC_PKG)
 
 $(TOOLS_BIN)/govulncheck: Makefile | $(TOOLS_BIN)
-	@GOBIN="$(TOOLS_BIN)" $(GO) install $(GOVULNCHECK_PKG)
+	@GOTOOLCHAIN="$(ANALYZER_GOTOOLCHAIN)" GOBIN="$(TOOLS_BIN)" $(GO) install $(GOVULNCHECK_PKG)
 
 clean: ## Remove the selected binary and coverage files while retaining tools and archives.
 	$(call PRINT_STEP,Removing local build outputs.)
